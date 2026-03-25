@@ -1,0 +1,44 @@
+# configs/default_config.yaml
+
+io:
+  data_path: "collected_data.zarr"
+  output_dir: "Results_IDUQ_Pipeline"
+  target_episode: "episode_2"
+
+kinematics:
+  dt: 0.03333333333333333  # 1/30.0
+  filter_win_pose: 31
+  poly_order_pose: 3
+
+perception:
+  filter_win_feat: 15
+  poly_order_feat: 2
+  trim_edge: 20
+  
+  # NLM (Non-Local Means) 保边去噪参数
+  nlm:
+    h: 15
+    template_window: 5
+    search_window: 21
+
+  # Farneback 光流参数
+  optical_flow:
+    pyr_scale: 0.5
+    levels: 3
+    winsize: 15
+    iterations: 3
+    poly_n: 5
+    poly_sigma: 1.2
+    flags: 0
+
+  # 置信度掩膜参数
+  masking:
+    noise_floor: 20
+    sigma_sq: 2500.0  # 50.0^2
+
+alignment:
+  fs: 30.0
+  cutoff_freq: 2.0
+  filter_order: 4
+  max_lag: 25
+  residual_smooth_win: 15
