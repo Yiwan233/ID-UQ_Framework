@@ -1,10 +1,11 @@
 # configs/default_config.yaml
 
 io:
-  data_path: "collected_data.zarr"
-  output_dir: "Results_IDUQ_Pipeline"
-  target_episode: "episode_2"
-
+  io:
+  # 使用相对路径，这样无论你在哪里运行脚本，都能定位到数据集
+  data_path: "data/servo_dataset_dp.zarr" 
+  output_dir: "results"
+  target_episode: "episode_1000"
 kinematics:
   dt: 0.03333333333333333  # 1/30.0
   filter_win_pose: 31
