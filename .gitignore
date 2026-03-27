@@ -1,0 +1,20 @@
+# .gitignore
+
+# 忽略数据集
+data/
+*.zarr/
+*.zgroup
+*.zarray
+
+# 忽略结果输出
+Results_*/
+results/
+*.png
+*.pdf
+*.csv
+
+# 忽略 Python 缓存和虚拟环境
+__pycache__/
+*.pyc
+.env/
+venv/
