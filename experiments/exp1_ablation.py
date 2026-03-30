@@ -131,27 +131,37 @@ def process_single_episode(ep_id, root, cfg, perception):
         
     except Exception as e:
         return {"Episode": ep_id, "Error": str(e)}
+import concurrent.futures
+from functools import partial
 
-# ==========================================
-# 3. 批量实验与学术绘图
-# ==========================================
 def run_batch_ablation():
     cfg = IDUQConfig.from_yaml("configs/default_config.yaml")
     out_dir = cfg.io['output_dir']
     os.makedirs(out_dir, exist_ok=True)
     
-    print(f"🚀 开始全量数据消融分析 (Dual-PE + DTW + Spearman)...")
+    print(f"🚀 开始全量数据消融分析 (多进程加速: Dual-PE + DTW + Spearman)...")
     root = safe_open_zarr(cfg.io['data_path'])
     perception = PhysicsAwarePerception(cfg)
     episodes = sorted(list(root.group_keys()))
     
     results = []
     
-    # 建议：如果只想测试图表能不能画出来，可以把 episodes 改成 episodes[:50]
-    for ep in tqdm(episodes, desc="Processing Episodes"):
-        res = process_single_episode(ep, root, cfg, perception)
-        if "Error" not in res:
-            results.append(res)
+    # ---------------------------------------------------------
+    # 🔥 核心加速：使用 ProcessPoolExecutor 进行多进程并行计算
+    # ---------------------------------------------------------
+    # 获取 CPU 核心数，保留 1-2 个核心给系统，防止电脑卡死
+    max_workers = max(1, os.cpu_count() - 2) 
+    print(f"⚡ 启动并行计算池，分配 {max_workers} 个 CPU 核心...")
+
+    # 使用 partial 固定公共参数，方便 map 函数调用
+    process_func = partial(process_single_episode, root=root, cfg=cfg, perception=perception)
+
+    # tqdm 结合多进程 map
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # executor.map 会将 episodes 分发给不同的 CPU 核心同时运行
+        for res in tqdm(executor.map(process_func, episodes), total=len(episodes), desc="Processing Episodes"):
+            if "Error" not in res:
+                results.append(res)
             
     df = pd.DataFrame(results)
     
@@ -174,7 +184,6 @@ def run_batch_ablation():
     # 1. 绘制箱线图展示分布 (Boxplot)
     plot_data = df[["Base_vs_Area", "Tool_vs_Area", "Tool_vs_Div_Ours"]]
     sns.boxplot(data=plot_data, ax=ax_box, palette="Set2")
-    # 添加散点显示真实分布情况
     sns.stripplot(data=plot_data, ax=ax_box, color=".25", alpha=0.3, size=3, jitter=True)
     
     ax_box.set_title("Ablation Study: Distribution of Kinematic Consistency across 1000+ Episodes", fontsize=14, fontweight='bold', pad=15)
