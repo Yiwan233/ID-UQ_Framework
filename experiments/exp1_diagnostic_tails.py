@@ -175,6 +175,72 @@ def run_diagnostic():
     
     print(f"\n✅ 诊断完成！共发现 {len(worst_tails)} 个拖尾样本 (rho < 0.4)。")
     print(f"📊 图表和坏点报告已保存至: {out_dir}")
+    # ==========================================
+    # 🏆 核心升级：量化物理病理对算法的打击 (Quantitative Pathology Analysis)
+    # ==========================================
+    print("\n" + "="*60)
+    print("🏆 真实工作边界与成功率分析 (Operating Envelope Analysis)")
+    print("="*60)
+    
+    # 成功标准：相关性 > 0.6 视为有效跟踪
+    success_threshold = 0.6
+    
+    # 1. 原始的全局成功率
+    raw_success_rate = np.mean(df['Correlation'] >= success_threshold) * 100
+    print(f"🌍 全局原始成功率 (All 1000+ Episodes): {raw_success_rate:.2f}%")
+    
+    # 2. 定义两大病理区 (Pathology Zones)
+    # 病理 A：发呆/无激励 (Z轴方差 < 1e-6)
+    mask_pathology_A = df['Z_Energy'] < 1e-6
+    # 病理 B：极端翻滚干扰 (侧滑+旋转方差 > 1.0)
+    mask_pathology_B = df['Interference'] > 1.0
+    
+    # 3. 计算两大病理区内的“崩溃率” (证明病理假设成立)
+    df_pathology_A = df[mask_pathology_A]
+    df_pathology_B = df[mask_pathology_B]
+    
+    if len(df_pathology_A) > 0:
+        fail_rate_A = np.mean(df_pathology_A['Correlation'] < success_threshold) * 100
+        print(f"🚨 [病理 A] 无激励区 (Z < 1e-6): 共有 {len(df_pathology_A)} 个样本，崩溃率为 {fail_rate_A:.2f}% (远高于全局平均！)")
+        
+    if len(df_pathology_B) > 0:
+        fail_rate_B = np.mean(df_pathology_B['Correlation'] < success_threshold) * 100
+        print(f"🚨 [病理 B] 极端干扰区 (干扰 > 1.0): 共有 {len(df_pathology_B)} 个样本，崩溃率为 {fail_rate_B:.2f}% (远高于全局平均！)")
+    
+    # 4. 物理边界过滤 (Define Operating Envelope) -> 剔除病理
+    envelope_mask = ~(mask_pathology_A | mask_pathology_B)
+    df_envelope = df[envelope_mask]
+    
+    envelope_ratio = np.mean(envelope_mask) * 100
+    print(f"\n🛡️ 剔除病理后的工作边界样本占比: {envelope_ratio:.2f}% ({len(df_envelope)}/{len(df)} episodes)")
+    
+    # 5. 计算真实成功率
+    if len(df_envelope) > 0:
+        true_success_rate = np.mean(df_envelope['Correlation'] >= success_threshold) * 100
+        print(f"🎯 物理边界内的【真实成功率】 (True Success Rate): {true_success_rate:.2f}%")
+        
+        true_mean_corr = df_envelope['Correlation'].mean()
+        print(f"📈 物理边界内的平均相关性 (True Mean Correlation): {true_mean_corr:.4f}")
+    
+    print("="*60)
+    
+    # --- 绘制一张“剔除病理数据后的提升对比图” ---
+    fig_bar, ax_bar = plt.subplots(figsize=(8, 6))
+    categories = ['Raw Dataset\n(Contains Pathologies)', 'Operating Envelope\n(Valid Mechanics Only)']
+    rates = [raw_success_rate, true_success_rate]
+    
+    bars = ax_bar.bar(categories, rates, color=['#B0BEC5', '#D62728'], width=0.5)
+    ax_bar.set_ylim(0, 105)
+    ax_bar.set_ylabel("Tracking Success Rate (%)", fontsize=12)
+    ax_bar.set_title("Success Rate Boost by Excluding Physical Pathologies", fontsize=14, fontweight='bold', pad=15)
+    
+    # 在柱子上加数字
+    for bar in bars:
+        yval = bar.get_height()
+        ax_bar.text(bar.get_x() + bar.get_width()/2, yval + 2, f'{yval:.1f}%', ha='center', va='bottom', fontsize=12, fontweight='bold')
+        
+    plt.tight_layout()
+    plt.savefig(os.path.join(out_dir, "True_Success_Rate_Pathology.png"), dpi=300)
 
 if __name__ == "__main__":
     run_diagnostic()
