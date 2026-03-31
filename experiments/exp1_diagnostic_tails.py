@@ -41,13 +41,16 @@ def compute_correlation(sig_robot, sig_feat, cfg):
     s2_al = np.array([s2[j] for i, j in path])
     corr, _ = stats.spearmanr(s1_al, s2_al)
     return abs(corr)
+# 注意：确保在 exp1_diagnostic_tails.py 文件顶部导入 cupy
+import cupy as cp
+import traceback
 
 def extract_meta_features(ep_id, config_path):
     """
-    🔥 核心修复：子进程完全独立运行，自己读取配置、打开Zarr并实例化感知器
+    🔥 核心修复：子进程完全独立运行，适配 GPU 加速版的 Perception
     """
     try:
-        # 1. 子进程独立初始化
+        # 1. 子进程独立初始化 (这完美避开了多进程 CUDA Context 冲突的坑)
         cfg = IDUQConfig.from_yaml(config_path)
         root = safe_open_zarr(cfg.io['data_path'])
         perception = PhysicsAwarePerception(cfg)
@@ -57,7 +60,7 @@ def extract_meta_features(ep_id, config_path):
         if len(images) < 50: 
             return {"Episode": ep_id, "Error": "Too short"}
         
-        # 3. 提取运动学与视觉流
+        # 3. 提取运动学与视觉流 (内部已由 CuPy 和 einsum 加速)
         xi_tool, s_dot = perception.process_episode(images, poses)
         
         # ==========================================
@@ -70,8 +73,16 @@ def extract_meta_features(ep_id, config_path):
         contact_ratios = []
         for img in images[1::5]: 
             gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if len(img.shape)==3 else img
-            W = perception.get_confidence_mask(gray)
-            contact_ratios.append(np.mean(W > 0.5))
+            
+            # 🚀 适配 GPU 架构：将 CPU 图像转为 CuPy 数组推入显存
+            gray_cp = cp.array(gray, dtype=cp.float64)
+            
+            # 调用新的 GPU 版掩膜函数
+            W_cp = perception.get_confidence_mask_gpu(gray_cp)
+            
+            # 在 GPU 上计算掩膜有效率，然后拉回 CPU 存入列表
+            contact_ratios.append(float(cp.mean(W_cp > 0.5)))
+            
         contact_quality = np.mean(contact_ratios)
 
         # 4. 计算相关性
@@ -86,7 +97,6 @@ def extract_meta_features(ep_id, config_path):
             "Contact_Quality": contact_quality
         }
     except Exception as e:
-        # 记录详细错误信息，发回给主进程
         err_msg = traceback.format_exc()
         return {"Episode": ep_id, "Error": str(e), "Traceback": err_msg}
 
