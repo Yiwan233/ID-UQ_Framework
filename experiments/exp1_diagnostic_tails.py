@@ -13,6 +13,7 @@ import seaborn as sns
 from tqdm import tqdm
 import concurrent.futures
 from functools import partial
+import traceback
 
 # 引入核心库
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -24,7 +25,6 @@ from core.data_loader import safe_open_zarr, get_episode_data
 from scipy.signal import butter, filtfilt
 from sklearn.preprocessing import StandardScaler
 from fastdtw import fastdtw
-from scipy.ndimage import uniform_filter1d
 
 def butter_lowpass_filter(data, cutoff, fs, order=4):
     if len(data) < 15: return data
@@ -42,36 +42,39 @@ def compute_correlation(sig_robot, sig_feat, cfg):
     corr, _ = stats.spearmanr(s1_al, s2_al)
     return abs(corr)
 
-def extract_meta_features(ep_id, root, cfg, perception):
+def extract_meta_features(ep_id, config_path):
     """
-    🔥 核心：不仅仅计算相关性，还要提取当前 Episode 的宏观物理属性
+    🔥 核心修复：子进程完全独立运行，自己读取配置、打开Zarr并实例化感知器
     """
     try:
-        images, poses = get_episode_data(root, ep_id)
-        if len(images) < 50: return {"Episode": ep_id, "Error": "Too short"}
+        # 1. 子进程独立初始化
+        cfg = IDUQConfig.from_yaml(config_path)
+        root = safe_open_zarr(cfg.io['data_path'])
+        perception = PhysicsAwarePerception(cfg)
         
-        # 1. 提取运动学与视觉流
+        # 2. 读取数据
+        images, poses = get_episode_data(root, ep_id)
+        if len(images) < 50: 
+            return {"Episode": ep_id, "Error": "Too short"}
+        
+        # 3. 提取运动学与视觉流
         xi_tool, s_dot = perception.process_episode(images, poses)
         
         # ==========================================
         # 💎 提取物理元特征 (Meta-features)
         # ==========================================
-        # A. 法向激励能量 (Z-axis Excitation Energy): 这个序列里，下压动作到底有多剧烈？
         z_energy = np.var(xi_tool[:, 2])
-        
-        # B. 侧滑/翻滚干扰 (Lateral & Rotational Interference): 除了下压，它是不是在乱晃？
         lateral_energy = np.var(xi_tool[:, 0]) + np.var(xi_tool[:, 1])
         rotational_energy = np.linalg.norm(np.var(xi_tool[:, 3:6], axis=0))
         
-        # C. 图像接触质量 (Acoustic Contact Quality): 图像有没有黑掉？(置信度掩膜的平均占比)
         contact_ratios = []
-        for img in images[1::5]: # 抽样检查以加快速度
+        for img in images[1::5]: 
             gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if len(img.shape)==3 else img
             W = perception.get_confidence_mask(gray)
             contact_ratios.append(np.mean(W > 0.5))
         contact_quality = np.mean(contact_ratios)
 
-        # 2. 计算相关性
+        # 4. 计算相关性
         corr_ours = compute_correlation(xi_tool[:, 2], s_dot[:, 2], cfg)
         
         return {
@@ -83,28 +86,47 @@ def extract_meta_features(ep_id, root, cfg, perception):
             "Contact_Quality": contact_quality
         }
     except Exception as e:
-        return {"Episode": ep_id, "Error": str(e)}
+        # 记录详细错误信息，发回给主进程
+        err_msg = traceback.format_exc()
+        return {"Episode": ep_id, "Error": str(e), "Traceback": err_msg}
 
 def run_diagnostic():
     print("🚀 开始拖尾诊断分析 (Tail Diagnostics)...")
-    cfg = IDUQConfig.from_yaml("configs/default_config.yaml")
+    config_path = "configs/default_config.yaml"
+    cfg = IDUQConfig.from_yaml(config_path)
     out_dir = os.path.join(cfg.io['output_dir'], "Diagnostics")
     os.makedirs(out_dir, exist_ok=True)
     
+    # 主进程只负责获取 episode 列表
     root = safe_open_zarr(cfg.io['data_path'])
-    perception = PhysicsAwarePerception(cfg)
     episodes = sorted(list(root.group_keys()))
     
     results = []
+    errors = [] # 记录报错的 Episode
+    
     max_workers = max(1, os.cpu_count() - 2)
-    process_func = partial(extract_meta_features, root=root, cfg=cfg, perception=perception)
+    # 只把配置路径传给子进程，避开 Zarr 对象的跨进程传输
+    process_func = partial(extract_meta_features, config_path=config_path)
 
+    print(f"⚡ 启动多进程池 (Workers: {max_workers})...")
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         for res in tqdm(executor.map(process_func, episodes), total=len(episodes)):
-            if "Error" not in res: results.append(res)
-            
+            if "Error" not in res: 
+                results.append(res)
+            else:
+                errors.append(res)
+                
+    # 🚨 防吞错机制：如果全军覆没，大声报错！
     df = pd.DataFrame(results)
-    if df.empty: return
+    if df.empty: 
+        print("\n💥 灾难性警告：所有 Episode 均处理失败！DataFrame 为空！")
+        print("👇 截取第一个失败的详细报错信息：")
+        print(errors[0].get("Traceback", errors[0]["Error"]))
+        return
+
+    # 如果有部分失败，打印个警告
+    if len(errors) > 0:
+        print(f"\n⚠️ 警告：有 {len(errors)} 个 Episode 处理失败被跳过。")
 
     # ==========================================
     # 💎 绘制诊断散点图：寻找拖尾的真相
@@ -115,10 +137,10 @@ def run_diagnostic():
 
     # 散点图 1：相关性 vs. 法向下压能量
     sns.scatterplot(data=df, x='Z_Energy', y='Correlation', hue='Contact_Quality', palette='coolwarm', ax=axes[0], alpha=0.7)
-    axes[0].set_xscale('log') # 能量通常跨度很大，用对数轴
+    axes[0].set_xscale('log') 
     axes[0].set_title("Correlation vs. Z-axis Excitation\n(Proof of 'No Press, No Correlation')")
     axes[0].set_xlabel("Z-axis Variance (Log Scale)")
-    axes[0].axhline(0.4, color='red', linestyle='--', alpha=0.5) # 拖尾警戒线
+    axes[0].axhline(0.4, color='red', linestyle='--', alpha=0.5) 
 
     # 散点图 2：相关性 vs. 图像接触质量
     sns.scatterplot(data=df, x='Contact_Quality', y='Correlation', color='purple', ax=axes[1], alpha=0.6)
