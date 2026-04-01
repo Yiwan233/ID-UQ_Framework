@@ -134,7 +134,7 @@ class PhysicsAwarePerception:
         tw_val = nlm_cfg.get('template_window', 5)
         sw_val = nlm_cfg.get('search_window', 21)
         
-        for i in range(len(images)):
+        for i in range(step, len(images)):
             curr_img = images[i]
             curr_gray = cv2.cvtColor(curr_img, cv2.COLOR_RGB2GRAY) if len(curr_img.shape) == 3 else curr_img
             

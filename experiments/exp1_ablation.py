@@ -103,7 +103,7 @@ def process_single_episode(ep_id, root, cfg, perception):
         # 用来衡量探头在这一段里转得有多剧烈
         angular_vel_norm = np.linalg.norm(xi_tool[:, 3:6], axis=1)
         motion_complexity = np.mean(angular_vel_norm)
-
+        step = cfg.perception.get('step', 1)
         pos_z_smooth = savgol_filter(poses[:, 2], window_length=31, polyorder=3)
         robot_z_base = (np.diff(pos_z_smooth) / dt)[trim:-trim]
 
@@ -113,8 +113,8 @@ def process_single_episode(ep_id, root, cfg, perception):
             _, bin_img = cv2.threshold(gray, 40, 255, cv2.THRESH_BINARY)
             area_feat.append(-np.sum(bin_img > 0))
             
-        area_dot = savgol_filter(np.diff(area_feat)/dt, 15, 2)
-        area_dot = np.append(area_dot, area_dot[-1])[trim:-trim]
+        area_dot = (area_feat[step:] - area_feat[:-step]) / (dt * step)
+        area_dot = savgol_filter(area_dot, 15, 2)[trim:-trim]
 
         _, _, _, r1, _, _ = compute_dtw_aligned_correlation_dual_pe(robot_z_base, area_dot, cfg)
         _, _, _, r2, _, _ = compute_dtw_aligned_correlation_dual_pe(robot_z_tool, area_dot, cfg)
