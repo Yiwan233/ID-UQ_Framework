@@ -71,7 +71,7 @@ def evaluate_single_episode(ep_id, config_path):
             return {"Episode": ep_id, "Error": "Invalid scan"}
 
         # 标定区：最高质量的 85% 以上
-        calib_threshold = max_contact * 0.85
+        calib_threshold = max_contact * 0.90
         calib_idx = np.where(contact_arr > calib_threshold)[0][:150]
         
         if len(calib_idx) < 30: 
