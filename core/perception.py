@@ -59,7 +59,7 @@ class PhysicsAwarePerception:
         fan_mask = grey_closing(fan_mask, size=(15, 15))
         
         # 2. 高斯平滑
-        smooth_gray = gaussian_filter(gray_img_cp, sigma=1.0) # sigma=1 近似 5x5 kernel
+        smooth_gray = gaussian_filter(gray_img_cp, sigma=1.0) 
         
         # 3. Sobel 梯度计算
         grad_x = sobel(smooth_gray, axis=1)
@@ -81,7 +81,7 @@ class PhysicsAwarePerception:
             return cp.array([0.0, 0.0, 0.0, 0.0])
             
         flow_args = self.cfg['optical_flow']
-        # OpenCV 的 Farneback 默认使用 CPU (除非编译了 cv2.cuda)
+        # OpenCV 的 Farneback 
         flow = cv2.calcOpticalFlowFarneback(
             prev_img, curr_img, None,
             flow_args['pyr_scale'], flow_args['levels'], flow_args['winsize'],
@@ -89,7 +89,6 @@ class PhysicsAwarePerception:
             flow_args['flags']
         )
         
-        # 将计算好的光流场推送到 GPU
         flow_cp = cp.array(flow)
         vx, vy = flow_cp[..., 0], flow_cp[..., 1]
         valid_pixels = W_mask_cp > 0.5
@@ -116,30 +115,26 @@ class PhysicsAwarePerception:
         
         s_dot = []
         prev_clean = None
+        
+        # 🎯 核心修复：手动从配置字典中提取参数
         nlm_cfg = self.cfg['nlm']
+        h_val = nlm_cfg.get('h', 8)
+        tw_val = nlm_cfg.get('template_window', 5)
+        sw_val = nlm_cfg.get('search_window', 21)
         
         for i in range(len(images)):
             curr_img = images[i]
             curr_gray = cv2.cvtColor(curr_img, cv2.COLOR_RGB2GRAY) if len(curr_img.shape) == 3 else curr_img
             
-            # NLM 降噪 (CPU)
-            curr_clean = cv2.fastNlMeansDenoising(
-                curr_gray, None, 
-                h=nlm_cfg['h'], 
-                templateWindowSize=nlm_cfg['template_window'], 
-                searchWindowSize=nlm_cfg['search_window']
-            )
+            # ✅ 修复：改用位置参数传递，防止 OpenCV 无法识别 YAML 中的键名
+            curr_clean = cv2.fastNlMeansDenoising(curr_gray, None, h_val, tw_val, sw_val)
             
-            # 将清理后的图像转入 GPU
             curr_clean_cp = cp.array(curr_clean, dtype=cp.float64)
-            
-            # GPU 计算 Mask
             W_cp = self.get_confidence_mask_gpu(curr_clean_cp)
             
             if prev_clean is not None:
-                # 混合计算光流与仿射特征
                 affine_feat_cp = self.calculate_affine_flow_gpu(prev_clean, curr_clean, W_cp)
-                s_dot.append(affine_feat_cp.get()) # 拉回 CPU 暂存
+                s_dot.append(affine_feat_cp.get()) 
             else:
                 s_dot.append(np.array([0.0, 0.0, 0.0, 0.0]))
                 
@@ -147,7 +142,6 @@ class PhysicsAwarePerception:
             
         s_dot = np.array(s_dot)[1:]  
         
-        # 滤波保留在 CPU，因为 1D 数组 Savgol Filter CPU 速度极快
         for dim in range(4):
             s_dot[:, dim] = savgol_filter(
                 s_dot[:, dim], 
