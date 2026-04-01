@@ -1,31 +1,35 @@
 # experiments/exp3_flow_visualization.py
 
 import os
+import sys
 import zarr
 import numpy as np
 import cv2
+import cupy as cp
+
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
+# 引入核心库
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from core.config_loader import IDUQConfig
 from core.perception import PhysicsAwarePerception
 
-def run_evolution_analysis():
+def run_evolution_analysis_gpu():
     cfg = IDUQConfig.from_yaml("configs/default_config.yaml")
-    out_dir = cfg.io.get('output_dir_exp3', 'Results_EXP3_Evolution_NLM')
+    out_dir = os.path.join(cfg.io['output_dir'], 'EXP3_Flow_Viz_GPU')
     os.makedirs(out_dir, exist_ok=True)
     
-    print(f"🚀 开始全量时空演化分析 (已开启 Non-Local Means 高级超声去噪)...")
+    print(f"🚀 开始全量时空演化分析 (GPU 加速版)...")
     root = zarr.open(cfg.io['data_path'], mode='r')
     perception = PhysicsAwarePerception(cfg)
     
     observe_frames = [50, 100, 150, 200]
     observe_steps = [1, 5]
-    nlm_cfg = cfg.perception['nlm']
 
-    for ep in root.group_keys():
+    for ep in list(root.group_keys())[:5]: # 为了演示，只跑前5个
         ep_dir = os.path.join(out_dir, ep)
         os.makedirs(ep_dir, exist_ok=True)
         images = root[ep]['images'][:]
@@ -34,40 +38,29 @@ def run_evolution_analysis():
             for idx in observe_frames:
                 if idx + step >= len(images): continue
                 
-                prev_gray = cv2.cvtColor(images[idx], cv2.COLOR_RGB2GRAY) if len(images[idx].shape)==3 else images[idx]
-                curr_gray = cv2.cvtColor(images[idx+step], cv2.COLOR_RGB2GRAY) if len(images[idx+step].shape)==3 else images[idx+step]
+                # --- A. CPU 端 NLM 去噪 ---
+                prev_clean = cv2.fastNlMeansDenoising(images[idx], None, **cfg.perception['nlm'])
+                curr_clean = cv2.fastNlMeansDenoising(images[idx+step], None, **cfg.perception['nlm'])
                 
-                # NLM 去噪
-                prev_clean = cv2.fastNlMeansDenoising(prev_gray, None, h=nlm_cfg['h'], 
-                                                      templateWindowSize=nlm_cfg['template_window'], 
-                                                      searchWindowSize=nlm_cfg['search_window'])
-                curr_clean = cv2.fastNlMeansDenoising(curr_gray, None, h=nlm_cfg['h'], 
-                                                      templateWindowSize=nlm_cfg['template_window'], 
-                                                      searchWindowSize=nlm_cfg['search_window'])
+                # --- B. GPU 端计算 Mask 和光流 ---
+                W_cp = perception.get_confidence_mask_gpu(cp.array(curr_clean, dtype=cp.float64))
+                flow = cv2.calcOpticalFlowFarneback(prev_clean, curr_clean, None, **cfg.perception['optical_flow'])
                 
-                valid_mask = perception.get_confidence_mask(curr_clean) > 0.5
+                # --- C. GPU 端生成 HSV 和散度热力图 ---
+                flow_cp = cp.array(flow)
+                mag, ang = cp.angle(flow_cp[..., 0] + 1j * flow_cp[..., 1]), cp.abs(flow_cp[..., 0] + 1j * flow_cp[..., 1])
+                hsv_cp = cp.zeros((flow_cp.shape[0], flow_cp.shape[1], 3), dtype=cp.uint8)
+                hsv_cp[..., 0] = ang * 180 / cp.pi / 2
+                hsv_cp[..., 1] = 255
+                normalized_mag = cp.asnumpy(cv2.normalize(cp.asnumpy(mag), None, 0, 255, cv2.NORM_MINMAX))
+                hsv_cp[..., 2] = cp.array(normalized_mag)
                 
-                # 光流场
-                flow_args = cfg.perception['optical_flow']
-                flow = cv2.calcOpticalFlowFarneback(
-                    prev_clean, curr_clean, None,
-                    flow_args['pyr_scale'], flow_args['levels'], flow_args['winsize'],
-                    flow_args['iterations'], flow_args['poly_n'], flow_args['poly_sigma'], flow_args['flags']
-                )
-                vx, vy = flow[..., 0], flow[..., 1]
+                flow_rgb = cv2.cvtColor(cp.asnumpy(hsv_cp), cv2.COLOR_HSV2RGB)
+                flow_rgb[cp.asnumpy(W_cp <= 0.5)] = 0
                 
-                # HSV 转换
-                hsv = np.zeros((curr_gray.shape[0], curr_gray.shape[1], 3), dtype=np.uint8)
-                hsv[..., 1] = 255
-                mag, ang = cv2.cartToPolar(vx, vy)
-                hsv[..., 0] = ang * 180 / np.pi / 2
-                hsv[..., 2] = cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX)
-                flow_rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
-                flow_rgb[~valid_mask] = 0
-                
-                # 稠密散度场
-                div_map = cv2.Sobel(vx, cv2.CV_64F, 1, 0, ksize=3) + cv2.Sobel(vy, cv2.CV_64F, 0, 1, ksize=3)
-                div_map[~valid_mask] = np.nan
+                div_map_cp = perception.calculate_affine_flow_gpu(prev_clean, curr_clean, W_cp)[2]
+                div_map = cp.asnumpy(div_map_cp)
+                div_map[cp.asnumpy(W_cp <= 0.5)] = np.nan
                 
                 # 绘图 1x3
                 fig, axes = plt.subplots(1, 3, figsize=(18, 5))
@@ -98,4 +91,4 @@ def run_evolution_analysis():
     print(f"✅ 处理完毕！图表保存在 {out_dir}")
 
 if __name__ == "__main__":
-    run_evolution_analysis()
+    run_evolution_analysis_gpu()
