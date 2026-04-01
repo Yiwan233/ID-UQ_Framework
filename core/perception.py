@@ -39,7 +39,7 @@ class PhysicsAwarePerception:
         xi_base = (smooth_poses[step:] - smooth_poses[:-step]) / (self.kin_cfg['dt'] * step)
         
         # 批量获取旋转矩阵 (N, 3, 3)
-        rot_matrices = R.from_quat(poses[:-1, 3:7]).as_matrix() 
+        rot_matrices = R.from_quat(poses[:-step, 3:7]).as_matrix() # 将 [:-1] 改为 [:-step]
         v_b, w_b = xi_base[:, :3], xi_base[:, 3:6]
         
         # 批量转置矩阵并进行乘法运算 (N, 3, 3) @ (N, 3) -> (N, 3)
@@ -153,7 +153,7 @@ class PhysicsAwarePerception:
             prev_clean = curr_clean
             
         s_dot = np.array(s_dot)[1:]  
-        
+        xi = xi[1:]
         for dim in range(4):
             s_dot[:, dim] = savgol_filter(
                 s_dot[:, dim], 

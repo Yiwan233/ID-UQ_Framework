@@ -88,6 +88,9 @@ def compute_dtw_aligned_correlation_dual_pe(sig_robot, sig_feat, cfg):
 # ==========================================
 def process_single_episode(ep_id, root, cfg, perception):
     try:
+        cfg = IDUQConfig.from_yaml(config_path)
+        root = safe_open_zarr(cfg.io['data_path'])
+        perception = PhysicsAwarePerception(cfg)
         images, poses = get_episode_data(root, ep_id)
         if len(images) < 50:
             return {"Episode": ep_id, "Error": "Sequence too short"}
@@ -129,7 +132,8 @@ def process_single_episode(ep_id, root, cfg, perception):
         }
         
     except Exception as e:
-        return {"Episode": ep_id, "Error": str(e)}
+        # 返回详细的错误栈以便调试
+        return {"Episode": ep_id, "Error": f"{str(e)}\n{traceback.format_exc()}"}
 
 # ==========================================
 # 3. 批量实验与深度剖析绘图
@@ -153,9 +157,14 @@ def run_batch_ablation():
         for res in tqdm(executor.map(process_func, episodes), total=len(episodes), desc="Processing"):
             if "Error" not in res:
                 results.append(res)
+            else:
+                # 🔥 调试辅助：如果报错了，至少打印出来看看
+                print(f"\n❌ Error in {res['Episode']}: {res['Error']}")
             
     df = pd.DataFrame(results)
-    if df.empty: return
+    if df.empty: 
+        print("\n💥 严重错误: 处理结果为空，无法生成分析报表。请检查上述错误日志。")
+        return
     
     # 🔥 诚实修正 3：按“运动复杂度”将数据分为三组
     # Low (简单纯按压), Medium (带有轻微晃动), High (复杂扫查，大角度旋转)
