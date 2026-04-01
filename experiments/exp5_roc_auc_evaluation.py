@@ -26,11 +26,7 @@ from core.perception import PhysicsAwarePerception
 from core.data_loader import safe_open_zarr, get_episode_data
 
 def evaluate_single_episode(ep_id, config_path):
-    """
-    独立子进程：处理单个 Episode，使用动态相对阈值进行自动打标
-    """
     cv2.setNumThreads(1) 
-    
     try:
         cfg = IDUQConfig.from_yaml(config_path)
         root = safe_open_zarr(cfg.io['data_path'])
@@ -43,181 +39,117 @@ def evaluate_single_episode(ep_id, config_path):
         step = cfg.perception.get('step', 1)
         trim = cfg.perception.get('trim_edge', 20)
         
+        # 1. 核心 GPU 物理特征提取 (散度 D 与 机器人扭矩)
         xi_trim, s_dot_trim = perception.process_episode(images, poses)
-        
         min_len = min(len(xi_trim), len(s_dot_trim))
-        xi_trim = xi_trim[:min_len]
-        s_dot_trim = s_dot_trim[:min_len]
-        N_valid = min_len
+        xi_trim, s_dot_trim = xi_trim[:min_len], s_dot_trim[:min_len]
         
-        ssim_list = []
-        contact_ratios = []
+        ssim_list, contact_ratios = [], []
         
-        for k in range(N_valid):
+        for k in range(min_len):
             curr_idx = step + trim + 1 + k
             prev_idx = curr_idx - step
-            
-            if curr_idx >= len(images) or prev_idx < 0:
-                break
+            if curr_idx >= len(images): break
                 
-            img_curr = images[curr_idx]
-            img_prev = images[prev_idx]
-            
+            img_curr, img_prev = images[curr_idx], images[prev_idx]
             gray_curr = cv2.cvtColor(img_curr, cv2.COLOR_RGB2GRAY) if img_curr.ndim == 3 else img_curr
             gray_prev = cv2.cvtColor(img_prev, cv2.COLOR_RGB2GRAY) if img_prev.ndim == 3 else img_prev
             
             ssim_list.append(ssim(gray_prev, gray_curr, data_range=255))
             
-            # 高斯平滑抑制散斑
+            # 使用 GPU 掩膜计算接触质量
             gray_blur = cv2.GaussianBlur(gray_curr, (7, 7), 0)
-            gray_cp = cp.array(gray_blur, dtype=cp.float64)
-            W_cp = perception.get_confidence_mask_gpu(gray_cp)
-            
+            W_cp = perception.get_confidence_mask_gpu(cp.array(gray_blur, dtype=cp.float64))
             contact_ratios.append(float(cp.mean(W_cp > 0.5)))
             
         N_valid = len(ssim_list)
-        xi_trim = xi_trim[:N_valid]
-        s_dot_trim = s_dot_trim[:N_valid]
+        ssim_arr, contact_arr = np.array(ssim_list), np.array(contact_ratios)
         
-        ssim_arr = np.array(ssim_list)
-        contact_arr = np.array(contact_ratios)
-        
-        # ==========================================
-        # 🚀 核心修复：相对动态阈值 (Relative Dynamic Thresholding)
-        # ==========================================
+        # 2. 动态相对阈值逻辑
         max_contact = np.max(contact_arr)
         if max_contact < 0.1:
-            return {"Episode": ep_id, "Error": f"Blank or invalid ultrasound images (Max contact: {max_contact:.2f})"}
+            return {"Episode": ep_id, "Error": "Invalid scan"}
 
-        # 1. 标定区提取：取该序列最高接触质量的 85% 以上作为 Nominal Zone
+        # 标定区：最高质量的 85% 以上
         calib_threshold = max_contact * 0.85
-        good_contact_idx = np.where(contact_arr > calib_threshold)[0]
+        calib_idx = np.where(contact_arr > calib_threshold)[0][:150]
         
-        if len(good_contact_idx) < 30: 
-            return {"Episode": ep_id, "Error": f"Not enough stable frames for calibration (Max: {max_contact:.2f})"}
+        if len(calib_idx) < 30: 
+            return {"Episode": ep_id, "Error": "Unstable calibration"}
             
-        calib_idx = good_contact_idx[:150]
+        # 3. 训练 Digital Twin 并计算 Sigma 残差
+        X_norm = StandardScaler().fit_transform(xi_trim[:N_valid, 2].reshape(-1, 1))
+        Y_norm = StandardScaler().fit_transform(s_dot_trim[:N_valid, 2].reshape(-1, 1))
         
-        vz = xi_trim[:, 2].reshape(-1, 1)
-        div = s_dot_trim[:, 2].reshape(-1, 1)
-        
-        X_norm = StandardScaler().fit_transform(vz)
-        Y_norm = StandardScaler().fit_transform(div)
-        
-        # 训练数字孪生基线模型
-        model = Ridge(alpha=1.0)
-        model.fit(X_norm[calib_idx], Y_norm[calib_idx])
-        
+        model = Ridge(alpha=1.0).fit(X_norm[calib_idx], Y_norm[calib_idx])
         R_phys_raw = np.abs(Y_norm - model.predict(X_norm)).flatten()
         sigma_calib = np.std(R_phys_raw[calib_idx]) + 1e-6
         R_phys_sigma = R_phys_raw / sigma_calib 
         
-        # 2. 异常打标：接触面积跌破最高值的 50% 视为发生恶性滑脱
-        slip_threshold = max_contact * 0.50
+        # 🚀 提升敏感度：接触面积跌破最高值的 75% 即视为异常 (25% 的流失)
+        slip_threshold = max_contact * 0.75 
         y_true = (contact_arr < slip_threshold).astype(int)
         
-        return {
-            "Episode": ep_id,
-            "R_phys": R_phys_sigma, 
-            "SSIM": ssim_arr,
-            "y_true": y_true
-        }
+        return {"Episode": ep_id, "R_phys": R_phys_sigma, "SSIM": ssim_arr, "y_true": y_true}
         
     except Exception as e:
-        return {"Episode": ep_id, "Error": f"{str(e)}\n{traceback.format_exc()}"}
+        return {"Episode": ep_id, "Error": str(e)}
 
 def run_roc_analysis():
-    print("🚀 开始 300+ 序列全量评估 (Physical Weak Supervision Auto-Labeling)...")
+    print("🚀 开始 300+ 序列全量评估 (敏感度增强版)...")
     config_path = "configs/default_config.yaml"
     cfg = IDUQConfig.from_yaml(config_path)
-    out_dir = cfg.io.get('output_dir_exp5', 'Results_EXP5_ROC_AUC')
+    out_dir = os.path.join(cfg.io.get('output_dir', 'Results'), 'EXP5_ROC')
     os.makedirs(out_dir, exist_ok=True)
     
     root = safe_open_zarr(cfg.io['data_path'])
     episodes = sorted(list(root.group_keys()))
     
-    max_workers = 6 
-    process_func = partial(evaluate_single_episode, config_path=config_path)
-    
     all_R_phys, all_ssim, all_y_true = [], [], []
-    valid_episodes = 0
-    errors = []
+    valid_count = 0
 
-    print(f"⚡ 启动并行计算池 (Workers: {max_workers})...")
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=6) as executor:
+        process_func = partial(evaluate_single_episode, config_path=config_path)
         for res in tqdm(executor.map(process_func, episodes), total=len(episodes), desc="Evaluating"):
             if "Error" not in res:
                 all_R_phys.extend(res['R_phys'])
                 all_ssim.extend(res['SSIM'])
                 all_y_true.extend(res['y_true'])
-                valid_episodes += 1
+                valid_count += 1
             else:
-                errors.append(res)
-                # 屏蔽一些已知的不重要警告，保持输出整洁
-                if "Not enough stable frames" not in res['Error'] and "Too short" not in res['Error']:
-                    tqdm.write(f"⚠️ 跳过 {res['Episode']}: {res['Error'].splitlines()[0]}")
+                if "too short" not in res['Error'].lower():
+                    tqdm.write(f"⚠️ {res['Episode']} Skipped: {res['Error']}")
 
-    if len(all_y_true) == 0:
-        print("\n💥 灾难性错误：所有数据提取失败。请往上翻阅红色的警告日志！")
-        return
-        
-    print(f"\n✅ 数据提取完毕！成功处理了 {valid_episodes} 个 Episodes，共提取 {len(all_y_true)} 帧测试样本。")
-    if errors:
-        print(f"ℹ️ 有 {len(errors)} 个序列由于数据长度不够或无合法接触区间被自动过滤。")
-
-    # ==========================================
-    # 计算全局 ROC 与 AUC
-    # ==========================================
-    print("📊 正在计算全局十万帧级别的 ROC 曲线...")
     y_true_global = np.array(all_y_true)
     R_phys_global = np.array(all_R_phys)
     ssim_global = np.array(all_ssim)
-    
-    if len(np.unique(y_true_global)) < 2:
-        print("💥 全局数据集中未检测到正负样本（全是正常，或全是异常），无法绘制 ROC。")
+
+    # 📊 诊断打印
+    n_pos = np.sum(y_true_global)
+    n_neg = len(y_true_global) - n_pos
+    print(f"\n✅ 数据提取完毕：成功处理 {valid_count} 个 Episode")
+    print(f"📈 标签分布: [正常帧: {n_neg}] | [异常帧: {n_pos}]")
+
+    if n_pos == 0 or n_neg == 0:
+        print("💥 错误：依然没有检测到异常样本。请尝试进一步调高阈值（例如将 0.75 改为 0.85）。")
         return
 
+    # ROC 计算
     fpr_base, tpr_base, _ = roc_curve(y_true_global, -ssim_global)
-    auc_base = auc(fpr_base, tpr_base)
-    
     fpr_ours, tpr_ours, thresholds = roc_curve(y_true_global, R_phys_global)
-    auc_ours = auc(fpr_ours, tpr_ours)
-    optimal_idx = np.argmax(tpr_ours - fpr_ours)
     
-    # ==========================================
-    # 顶级学术绘图
-    # ==========================================
-    sns.set_theme(style="whitegrid")
-    fig = plt.figure(figsize=(10, 8))
+    plt.figure(figsize=(10, 8))
+    plt.plot(fpr_base, tpr_base, color='gray', linestyle='--', label=f'Baseline (SSIM) AUC={auc(fpr_base, tpr_base):.3f}')
+    plt.plot(fpr_ours, tpr_ours, color='crimson', lw=3, label=f'Ours (R_phys) AUC={auc(fpr_ours, tpr_ours):.3f}')
+    plt.plot([0, 1], [0, 1], color='navy', linestyle=':')
+    plt.title(f'Global ROC Evaluation ({valid_count} episodes)', fontsize=15, fontweight='bold')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.legend(loc="lower right")
     
-    plt.plot(fpr_base, tpr_base, color='gray', linestyle='--', lw=2.5, 
-             label=f'Baseline (Pure Image SSIM) AUC = {auc_base:.3f}')
-             
-    plt.plot(fpr_ours, tpr_ours, color='crimson', lw=3, 
-             label=fr'Proposed ($\mathcal{{R}}_{{phys}}$) AUC = {auc_ours:.3f}')
-             
-    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle=':')
-    plt.fill_between(fpr_ours, tpr_ours, alpha=0.15, color='crimson')
-    
-    plt.scatter(fpr_ours[optimal_idx], tpr_ours[optimal_idx], marker='*', color='gold', s=250, edgecolor='black', zorder=5, 
-                label=f'Optimal Trigger Point ($R_{{phys}} \geq {thresholds[optimal_idx]:.2f}\sigma$)')
-    
-    plt.xlim([-0.02, 1.0])
-    plt.ylim([0.0, 1.05])
-    plt.xlabel('False Positive Rate (FPR) - [False Alarms in Clinic]', fontsize=14)
-    plt.ylabel('True Positive Rate (TPR) - [Successful Slip Detections]', fontsize=14)
-    plt.title(f'Global ROC Evaluation across {valid_episodes} Unannotated Sequences', fontsize=16, fontweight='bold', pad=15)
-    plt.legend(loc="lower right", fontsize=13)
-    
-    plt.tight_layout()
-    save_path = os.path.join(out_dir, 'Global_ROC_AUC_Evaluation.png')
+    save_path = os.path.join(out_dir, 'Global_ROC_AUC_Sensitivity_Enhanced.png')
     plt.savefig(save_path, dpi=300)
-    plt.close(fig)
-    
-    print(f"\n🎉 惊人的结果！")
-    print(f"👉 Baseline (纯视觉 SSIM) AUC: {auc_base:.3f}")
-    print(f"👉 Ours (物理统计 Z-Score) AUC: {auc_ours:.3f}")
-    print(f"🚀 图表已保存至: {save_path}")
+    print(f"🎉 评估完成！终极图表已保存至: {save_path}")
 
 if __name__ == "__main__":
     run_roc_analysis()
