@@ -11,7 +11,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.linear_model import Ridge
-from sklearn.preprocessing import StandardScaler, MinMaxScaler
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import roc_curve, auc
 from skimage.metrics import structural_similarity as ssim
 from tqdm import tqdm
@@ -45,16 +45,25 @@ def evaluate_single_episode(ep_id, config_path):
         
         # 1. 核心 GPU 物理特征提取
         xi_trim, s_dot_trim = perception.process_episode(images, poses)
-        N_valid = len(xi_trim)
         
-        # 2. 时序严格对齐的 SSIM 与掩膜质量提取
+        # 🛡️ 终极防御 1：强制对齐长度 (防底层 perception 漏掉维度对齐)
+        min_len = min(len(xi_trim), len(s_dot_trim))
+        xi_trim = xi_trim[:min_len]
+        s_dot_trim = s_dot_trim[:min_len]
+        N_valid = min_len
+        
         ssim_list = []
         contact_ratios = []
         
         for k in range(N_valid):
-            curr_idx = step + trim + k
+            # 🛡️ 严格时序对齐：根据 s_dot 截取逻辑计算当前帧的物理索引
+            curr_idx = step + trim + 1 + k
             prev_idx = curr_idx - step
             
+            # 安全越界保护
+            if curr_idx >= len(images) or prev_idx < 0:
+                break
+                
             img_curr = images[curr_idx]
             img_prev = images[prev_idx]
             
@@ -64,22 +73,28 @@ def evaluate_single_episode(ep_id, config_path):
             # 记录 Baseline: 纯图像 SSIM
             ssim_list.append(ssim(gray_prev, gray_curr, data_range=255))
             
-            # 计算掩膜接触质量 (用于自动打标)
-            gray_cp = cp.array(gray_curr, dtype=cp.float64)
+            # 🚀 关键修复：强烈的高斯平滑，抑制超声散斑对掩膜的毁灭性打击！
+            gray_blur = cv2.GaussianBlur(gray_curr, (7, 7), 0)
+            gray_cp = cp.array(gray_blur, dtype=cp.float64)
             W_cp = perception.get_confidence_mask_gpu(gray_cp)
+            
             contact_ratios.append(float(cp.mean(W_cp > 0.5)))
             
+        # 重新对齐 (防 break 提前结束)
+        N_valid = len(ssim_list)
+        xi_trim = xi_trim[:N_valid]
+        s_dot_trim = s_dot_trim[:N_valid]
+        
         ssim_arr = np.array(ssim_list)
         contact_arr = np.array(contact_ratios)
         
-        # 3. 物理弱监督：自动寻找 Calibration Zone
-        # 选取接触质量好的帧作为标定基础
+        # 3. 物理弱监督：寻找 Calibration Zone
         good_contact_idx = np.where(contact_arr > 0.6)[0]
-        if len(good_contact_idx) < 50:
-            return {"Episode": ep_id, "Error": "Not enough nominal contact frames for calibration."}
+        # 放宽限制：只要有 30 帧好的，就能勉强作为名义标定
+        if len(good_contact_idx) < 30: 
+            return {"Episode": ep_id, "Error": f"Contact ratio too low (Max: {np.max(contact_arr):.2f})"}
             
-        # 使用前 150 个优质接触帧作为标定
-        calib_idx = good_contact_idx[:150]
+        calib_idx = good_contact_idx[:150] # 取早期最多 150 帧作为标定
         
         vz = xi_trim[:, 2].reshape(-1, 1)
         div = s_dot_trim[:, 2].reshape(-1, 1)
@@ -87,21 +102,24 @@ def evaluate_single_episode(ep_id, config_path):
         X_norm = StandardScaler().fit_transform(vz)
         Y_norm = StandardScaler().fit_transform(div)
         
-        # 训练标定模型
+        # 训练标定模型 (Nominal Digital Twin)
         model = Ridge(alpha=1.0)
         model.fit(X_norm[calib_idx], Y_norm[calib_idx])
         
         # 4. 计算交互风险残差 R_phys
-        R_phys = np.abs(Y_norm - model.predict(X_norm)).flatten()
-        # 归一化残差以便在全局数据集上统一阈值
-        R_phys = MinMaxScaler().fit_transform(R_phys.reshape(-1, 1)).flatten()
+        R_phys_raw = np.abs(Y_norm - model.predict(X_norm)).flatten()
         
-        # 5. 自动生成 Ground Truth: 当接触掩膜面积跌破 30% 视为发生严重滑脱异常
+        # 🚀 算法升级：替换掉 MinMaxScaler，改用物理统计 Z-Score
+        # 计算标定区间的标准差，以此为单位衡量异常幅度
+        sigma_calib = np.std(R_phys_raw[calib_idx]) + 1e-6
+        R_phys_sigma = R_phys_raw / sigma_calib 
+        
+        # 5. 自动生成 Ground Truth: 当声学接触面积跌破 30%，视为发生严重滑脱异常
         y_true = (contact_arr < 0.3).astype(int)
         
         return {
             "Episode": ep_id,
-            "R_phys": R_phys,
+            "R_phys": R_phys_sigma, # 返回带有物理量纲的 Sigma 分数
             "SSIM": ssim_arr,
             "y_true": y_true
         }
@@ -119,7 +137,7 @@ def run_roc_analysis():
     root = safe_open_zarr(cfg.io['data_path'])
     episodes = sorted(list(root.group_keys()))
     
-    # 控制多进程数量，防止显存与 PCIe 爆炸
+    # 控制多进程数量，防止显存爆炸
     max_workers = 6 
     process_func = partial(evaluate_single_episode, config_path=config_path)
     
@@ -136,35 +154,35 @@ def run_roc_analysis():
                 all_y_true.extend(res['y_true'])
                 valid_episodes += 1
             else:
-                errors.append(res['Episode'])
-                # tqdm.write(f"⚠️ 跳过 {res['Episode']}: {res['Error'].splitlines()[0]}")
+                errors.append(res)
+                # 🚀 强制打印出错原因，不要摸黑前行
+                tqdm.write(f"⚠️ 跳过 {res['Episode']}: {res['Error'].splitlines()[0]}")
 
     if len(all_y_true) == 0:
-        print("\n💥 灾难性错误：所有数据提取失败。")
+        print("\n💥 灾难性错误：所有数据提取失败。请往上翻阅红色的警告日志！")
         return
         
-    print(f"\n✅ 数据提取完毕！成功处理了 {valid_episodes} 个 Episodes，共获取了 {len(all_y_true)} 帧数据样本。")
+    print(f"\n✅ 数据提取完毕！成功处理了 {valid_episodes} 个 Episodes，共提取 {len(all_y_true)} 帧测试样本。")
     if errors:
-        print(f"⚠️ 有 {len(errors)} 个序列由于数据过短或无合法接触区间被跳过。")
+        print(f"ℹ️ 有 {len(errors)} 个序列由于数据长度不够或无接触区间而被自动忽略。")
 
     # ==========================================
     # 计算全局 ROC 与 AUC
     # ==========================================
-    print("📊 正在计算全局 ROC 曲线...")
+    print("📊 正在计算全局十万帧级别的 ROC 曲线...")
     y_true_global = np.array(all_y_true)
     R_phys_global = np.array(all_R_phys)
     ssim_global = np.array(all_ssim)
     
-    # 过滤掉全是 0 或全是 1 的极端情况防报错
     if len(np.unique(y_true_global)) < 2:
-        print("💥 数据集中没有检测到异常标签 (或全是异常)，无法绘制 ROC。请检查接触掩膜的阈值。")
+        print("💥 全局数据集中未检测到正负样本（全是正常，或全是异常），无法绘制 ROC。")
         return
 
-    # Baseline: SSIM (负相关，SSIM 越低越可能是异常)
+    # Baseline: SSIM (因为 SSIM 越低越代表图像丢失，所以传入负值计算正相关 ROC)
     fpr_base, tpr_base, _ = roc_curve(y_true_global, -ssim_global)
     auc_base = auc(fpr_base, tpr_base)
     
-    # Ours: R_phys (正相关，残差越大越异常)
+    # Ours: R_phys (残差越大越代表滑脱异常)
     fpr_ours, tpr_ours, thresholds = roc_curve(y_true_global, R_phys_global)
     auc_ours = auc(fpr_ours, tpr_ours)
     optimal_idx = np.argmax(tpr_ours - fpr_ours)
@@ -186,12 +204,12 @@ def run_roc_analysis():
     
     # 标记最佳操作阈值点
     plt.scatter(fpr_ours[optimal_idx], tpr_ours[optimal_idx], marker='*', color='gold', s=250, edgecolor='black', zorder=5, 
-                label=f'Optimal Trigger Point ($R_{{phys}} \geq {thresholds[optimal_idx]:.2f}$)')
+                label=f'Optimal Trigger Point ($R_{{phys}} \geq {thresholds[optimal_idx]:.2f}\sigma$)')
     
     plt.xlim([-0.02, 1.0])
     plt.ylim([0.0, 1.05])
-    plt.xlabel('False Positive Rate (FPR) - [False Alarms]', fontsize=14)
-    plt.ylabel('True Positive Rate (TPR) - [Successful Detections]', fontsize=14)
+    plt.xlabel('False Positive Rate (FPR) - [False Alarms in Clinic]', fontsize=14)
+    plt.ylabel('True Positive Rate (TPR) - [Successful Slip Detections]', fontsize=14)
     plt.title(f'Global ROC Evaluation across {valid_episodes} Unannotated Sequences', fontsize=16, fontweight='bold', pad=15)
     plt.legend(loc="lower right", fontsize=13)
     
@@ -202,7 +220,7 @@ def run_roc_analysis():
     
     print(f"\n🎉 惊人的结果！")
     print(f"👉 Baseline (纯视觉 SSIM) AUC: {auc_base:.3f}")
-    print(f"👉 Ours (物理驱动 R_phys) AUC: {auc_ours:.3f}")
+    print(f"👉 Ours (物理统计 Z-Score) AUC: {auc_ours:.3f}")
     print(f"🚀 图表已保存至: {save_path}")
 
 if __name__ == "__main__":
