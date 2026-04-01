@@ -20,15 +20,11 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-# 环境配置
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from core.config_loader import IDUQConfig
 from core.perception import PhysicsAwarePerception
 from core.data_loader import safe_open_zarr, get_episode_data
 
-# ==========================================
-# 1. 核心数学：双重 PE 门控对齐引擎
-# ==========================================
 def butter_lowpass_filter(data, cutoff, fs, order=4):
     if len(data) < 15: return data
     nyq = 0.5 * fs
@@ -37,6 +33,9 @@ def butter_lowpass_filter(data, cutoff, fs, order=4):
     return filtfilt(b, a, data)
 
 def compute_dtw_aligned_correlation_dual_pe(sig_robot, sig_feat, cfg):
+    if len(sig_robot) == 0 or len(sig_feat) == 0:
+        return np.array([]), np.array([]), 0.0, 0.0, np.array([]), []
+        
     fs = cfg.alignment['fs']
     cutoff = cfg.alignment['cutoff_freq']
     
@@ -47,7 +46,6 @@ def compute_dtw_aligned_correlation_dual_pe(sig_robot, sig_feat, cfg):
     sig_robot_norm = scaler.fit_transform(sig_robot_cl.reshape(-1, 1)).flatten()
     sig_feat_norm = scaler.fit_transform(sig_feat_cl.reshape(-1, 1)).flatten()
 
-    # 🔥 诚实修正 1：限制 DTW 最大扭曲半径为 15帧(0.5秒)，防止为了拟合而强行扭曲非物理噪声
     distance, path = fastdtw(sig_robot_norm, sig_feat_norm, radius=15)
     
     aligned_robot = np.array([sig_robot_norm[idx1] for idx1, idx2 in path])
@@ -55,9 +53,8 @@ def compute_dtw_aligned_correlation_dual_pe(sig_robot, sig_feat, cfg):
     aligned_robot_raw = np.array([sig_robot[idx1] for idx1, idx2 in path]) 
 
     raw_corr, _ = stats.spearmanr(aligned_robot, aligned_feat)
-    raw_corr = abs(raw_corr)
+    raw_corr = 0.0 if np.isnan(raw_corr) else abs(raw_corr)
     
-    # 🔥 双重 PE 门控
     vel_thresh = max(0.001, cfg.perception['pe_threshold_ratio'] * np.max(np.abs(aligned_robot_raw)))
     mask_vel = np.abs(aligned_robot_raw) > vel_thresh
     
@@ -76,37 +73,34 @@ def compute_dtw_aligned_correlation_dual_pe(sig_robot, sig_feat, cfg):
         x_pe = aligned_robot[pe_mask]
         y_pe = aligned_feat[pe_mask]
         pe_corr, _ = stats.spearmanr(x_pe, y_pe)
-        pe_corr = abs(pe_corr)
+        pe_corr = 0.0 if np.isnan(pe_corr) else abs(pe_corr)
     else:
         pe_corr = raw_corr 
         pe_mask = np.ones_like(aligned_robot_raw, dtype=bool) 
         
     return aligned_robot, aligned_feat, raw_corr, pe_corr, pe_mask, path
 
-# ==========================================
-# 2. 单序列特征提取
-# ==========================================
-def process_single_episode(ep_id, root, cfg, perception):
+# 🔥 完全隔离子进程状态，杜绝内存/类型泄漏
+def process_single_episode(ep_id, config_path):
     try:
         cfg = IDUQConfig.from_yaml(config_path)
         root = safe_open_zarr(cfg.io['data_path'])
         perception = PhysicsAwarePerception(cfg)
+        
         images, poses = get_episode_data(root, ep_id)
         if len(images) < 50:
             return {"Episode": ep_id, "Error": "Sequence too short"}
         
         dt, trim = cfg.kinematics['dt'], cfg.perception['trim_edge']
+        step = cfg.perception.get('step', 1)
         
-        # 提取运动学与视觉特征
         xi_tool, s_dot = perception.process_episode(images, poses)
         robot_z_tool = xi_tool[:, 2]
         div_feat = s_dot[:, 2]
         
-        # 🔥 诚实修正 2：计算这个 Episode 的“运动复杂度” (平均角速度范数)
-        # 用来衡量探头在这一段里转得有多剧烈
         angular_vel_norm = np.linalg.norm(xi_tool[:, 3:6], axis=1)
         motion_complexity = np.mean(angular_vel_norm)
-        step = cfg.perception.get('step', 1)
+        
         pos_z_smooth = savgol_filter(poses[:, 2], window_length=31, polyorder=3)
         robot_z_base = (np.diff(pos_z_smooth) / dt)[trim:-trim]
 
@@ -116,6 +110,8 @@ def process_single_episode(ep_id, root, cfg, perception):
             _, bin_img = cv2.threshold(gray, 40, 255, cv2.THRESH_BINARY)
             area_feat.append(-np.sum(bin_img > 0))
             
+        # 🔥 核心修复：将 list 转换为 numpy array，否则无法相减
+        area_feat = np.array(area_feat)
         area_dot = (area_feat[step:] - area_feat[:-step]) / (dt * step)
         area_dot = savgol_filter(area_dot, 15, 2)[trim:-trim]
 
@@ -128,58 +124,48 @@ def process_single_episode(ep_id, root, cfg, perception):
             "Base_vs_Area": r1, 
             "Tool_vs_Area": r2, 
             "Tool_vs_Div_Ours": r3,
-            "Motion_Complexity": motion_complexity # 加入复杂度指标
+            "Motion_Complexity": motion_complexity
         }
-        
     except Exception as e:
-        # 返回详细的错误栈以便调试
-        return {"Episode": ep_id, "Error": f"{str(e)}\n{traceback.format_exc()}"}
+        err_trace = traceback.format_exc()
+        return {"Episode": ep_id, "Error": f"{str(e)}\n{err_trace}"}
 
-# ==========================================
-# 3. 批量实验与深度剖析绘图
-# ==========================================
 def run_batch_ablation():
-    cfg = IDUQConfig.from_yaml("configs/default_config.yaml")
+    config_path = "configs/default_config.yaml"
+    cfg = IDUQConfig.from_yaml(config_path)
     out_dir = cfg.io['output_dir']
     os.makedirs(out_dir, exist_ok=True)
     
     print(f"🚀 开始全量诚实分析 (按探头旋转复杂度分级评估)...")
     root = safe_open_zarr(cfg.io['data_path'])
-    perception = PhysicsAwarePerception(cfg)
     episodes = sorted(list(root.group_keys()))
-    results = []
 
     max_workers = max(1, os.cpu_count() - 2) 
-    process_func = partial(process_single_episode, root=root, cfg=cfg, perception=perception)
+    process_func = partial(process_single_episode, config_path=config_path)
 
-    import concurrent.futures
+    results = []
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
         for res in tqdm(executor.map(process_func, episodes), total=len(episodes), desc="Processing"):
             if "Error" not in res:
                 results.append(res)
             else:
-                # 🔥 调试辅助：如果报错了，至少打印出来看看
-                print(f"\n❌ Error in {res['Episode']}: {res['Error']}")
+                # 使用 tqdm.write 防止日志被进度条覆盖
+                tqdm.write(f"❌ [Error in {res.get('Episode', 'Unknown')}]:\n{res['Error']}")
             
     df = pd.DataFrame(results)
     if df.empty: 
-        print("\n💥 严重错误: 处理结果为空，无法生成分析报表。请检查上述错误日志。")
+        print("\n💥 严重错误: 处理结果为空，请查看上方的 ❌ Error 日志。")
         return
     
-    # 🔥 诚实修正 3：按“运动复杂度”将数据分为三组
-    # Low (简单纯按压), Medium (带有轻微晃动), High (复杂扫查，大角度旋转)
     df['Complexity_Tier'] = pd.qcut(df['Motion_Complexity'], q=3, labels=['Low (Pure Press)', 'Medium (Slight Tilt)', 'High (Complex Scan)'])
 
-    # --- 顶级学术绘图：分组折线图/柱状图 ---
     sns.set_theme(style="whitegrid")
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    # 将数据拉平 (Melt) 以便 Seaborn 绘制分组图
     df_melt = df.melt(id_vars=['Complexity_Tier'], 
                       value_vars=['Base_vs_Area', 'Tool_vs_Area', 'Tool_vs_Div_Ours'],
                       var_name='Method', value_name='Correlation')
 
-    # 绘制分组柱状图展示均值衰减趋势
     sns.barplot(data=df_melt, x='Complexity_Tier', y='Correlation', hue='Method', 
                 palette=['#7FBCA6', '#DE8F6E', '#808EB9'], ax=ax, errorbar=('ci', 95))
     
@@ -187,7 +173,6 @@ def run_batch_ablation():
     ax.set_ylabel("Spearman's Rank Correlation ($\\rho$)", fontsize=13)
     ax.set_xlabel("Probe Motion Complexity (Angular Velocity Magnitude)", fontsize=13)
     
-    # 替换图例标签
     handles, labels = ax.get_legend_handles_labels()
     ax.legend(handles, ["Baseline 1 (Base vs Area)", "Baseline 2 (Tool vs Area)", "Ours (Tool vs Divergence)"], title="Methods")
     
@@ -195,7 +180,6 @@ def run_batch_ablation():
     save_path = os.path.join(out_dir, "Ablation_Complexity_Analysis.png")
     plt.savefig(save_path, dpi=300)
     
-    # 保存详细分组数据
     grouped_stats = df.groupby('Complexity_Tier')[['Base_vs_Area', 'Tool_vs_Area', 'Tool_vs_Div_Ours']].mean()
     print("\n📊 按运动复杂度分级的均值表现 (The Honest Truth):")
     print(grouped_stats)
