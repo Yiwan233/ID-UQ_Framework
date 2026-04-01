@@ -49,29 +49,36 @@ class PhysicsAwarePerception:
         
         xi_tool = np.concatenate([v_e, w_e], axis=1)
         return xi_tool
-
-    def get_confidence_mask_gpu(self, gray_img_cp: cp.ndarray) -> cp.ndarray:
+def get_confidence_mask_gpu(self, gray_img_cp: cp.ndarray) -> cp.ndarray:
         """
         [🚀 优化] 在 GPU 上执行形态学、平滑和梯度计算
         """
-        # 🎯 修复核心：强制确保图像是 2D 的 (H, W)，去掉多余的通道维 (H, W, 1)
-        if gray_img_cp.ndim > 2:
-            gray_img_cp = gray_img_cp.squeeze()
-
-        # 1. 阈值分割 & 形态学闭运算
-        fan_mask = (gray_img_cp > 5).astype(cp.float64)
-        # 现在 size=(15, 15) 能完美匹配 2D 图像了
-        fan_mask = grey_closing(fan_mask, size=(15, 15))
+        # 1. 彻底降维：去掉所有长度为 1 的轴
+        gray_img_cp = gray_img_cp.squeeze()
         
-        # 2. 高斯平滑
+        # 2. 如果依然是 3D (比如 RGB 图像)，则强行取第一层
+        if gray_img_cp.ndim == 3:
+            gray_img_cp = gray_img_cp[..., 0]
+        
+        # 3. 确保现在是 2D
+        if gray_img_cp.ndim != 2:
+            raise ValueError(f"GPU感知器期望2D图像，但收到形状为 {gray_img_cp.shape} 的数组")
+
+        # 4. 阈值分割
+        fan_mask = (gray_img_cp > 5).astype(cp.float64)
+        
+        # 🎯 修复核心：使用标量 size=15 而不是元组 (15, 15)
+        # CuPy 会自动适配维度，这是最稳健的写法
+        fan_mask = grey_closing(fan_mask, size=15)
+        
+        # 5. 高斯平滑
         smooth_gray = gaussian_filter(gray_img_cp, sigma=1.0) 
         
-        # 3. Sobel 梯度计算
+        # 6. Sobel 梯度
         grad_x = sobel(smooth_gray, axis=1)
         grad_y = sobel(smooth_gray, axis=0)
         grad_mag_sq = grad_x**2 + grad_y**2
         
-        # 4. 掩码组合
         H_mask = (smooth_gray > self.cfg['masking']['noise_floor']).astype(cp.float64)
         sigma_sq = self.cfg['masking']['sigma_sq']
         

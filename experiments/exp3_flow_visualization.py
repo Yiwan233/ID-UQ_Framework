@@ -43,13 +43,28 @@ def run_evolution_analysis_gpu():
         images = root[ep]['images'][:]
         
         for step in observe_steps:
+            
             for idx in observe_frames:
                 if idx + step >= len(images): continue
                 
-                # --- A. CPU 端 NLM 去噪 (位置参数修复) ---
-                prev_clean = cv2.fastNlMeansDenoising(images[idx], None, h, tw, sw)
-                curr_clean = cv2.fastNlMeansDenoising(images[idx+step], None, h, tw, sw)
-                
+                # --- A. 极其鲁棒的图像提取 ---
+                img_p = images[idx]
+                img_c = images[idx+step]
+
+                # 🎯 强行降为 2D NumPy 数组
+                def force_2d_gray(img):
+                    img = np.squeeze(img) # 去掉 (1, H, W) 或 (H, W, 1)
+                    if img.ndim == 3:
+                        # 如果是 RGB (H, W, 3)
+                        return cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+                    return img
+
+                prev_gray = force_2d_gray(img_p)
+                curr_gray = force_2d_gray(img_c)
+
+                # --- B. NLM 去噪 ---
+                prev_clean = cv2.fastNlMeansDenoising(prev_gray, None, h, tw, sw)
+                curr_clean = cv2.fastNlMeansDenoising(curr_gray, None, h, tw, sw)
                 # --- B. GPU 端计算 Mask ---
                 curr_clean_cp = cp.array(curr_clean, dtype=cp.float64)
                 W_cp = perception.get_confidence_mask_gpu(curr_clean_cp)
