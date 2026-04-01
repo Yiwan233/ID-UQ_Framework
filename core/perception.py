@@ -124,7 +124,7 @@ class PhysicsAwarePerception:
 
     def process_episode(self, images: np.ndarray, poses: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         xi = self.extract_kinematics(poses)
-        
+        step = self.cfg.get('step', 1)
         s_dot = []
         prev_clean = None
         
