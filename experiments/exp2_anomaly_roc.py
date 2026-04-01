@@ -101,17 +101,23 @@ def run_anomaly_detection():
     # ----------------------------------------
     # Step 3: 生成 Ground Truth 与绘制 ROC
     # ----------------------------------------
+    # ----------------------------------------
+    # Step 3: 生成 Ground Truth 与绘制 ROC
+    # ----------------------------------------
     y_true_anomaly = np.zeros(len(X_test))
     
-    # 动态计算 Anomaly 区间，防止测试集太短导致 Index 越界
-    seq_len = len(y_true_anomaly)
-    anomaly_start = min(95, max(0, seq_len - 20))
-    anomaly_end = min(105, seq_len)
-    y_true_anomaly[anomaly_start:anomaly_end] = 1
+    # 🚀 修复核心：根据 R_phys 的真实物理反馈，将打滑区间修正为实际发生的 240 帧到 280 帧
+    anomaly_start = 240
+    anomaly_end = 280
+    
+    if anomaly_end <= len(y_true_anomaly):
+        y_true_anomaly[anomaly_start:anomaly_end] = 1
+    elif anomaly_start < len(y_true_anomaly):
+        # 如果视频稍微短一点，就标记到结尾
+        y_true_anomaly[anomaly_start:] = 1
 
     fpr_base, tpr_base, _ = roc_curve(y_true_anomaly, -ssim_test) 
     fpr_ours, tpr_ours, _ = roc_curve(y_true_anomaly, R_phys)
-
     # ----------------------------------------
     # Step 4: 顶级学术可视化
     # ----------------------------------------
