@@ -35,8 +35,8 @@ class PhysicsAwarePerception:
                 window_length=self.kin_cfg['filter_win_pose'], 
                 polyorder=self.kin_cfg['poly_order_pose']
             )
-            
-        xi_base = np.diff(smooth_poses, axis=0) / self.kin_cfg['dt']
+        step = self.cfg.get('step', 1)
+        xi_base = (smooth_poses[step:] - smooth_poses[:-step]) / (self.kin_cfg['dt'] * step)
         
         # 批量获取旋转矩阵 (N, 3, 3)
         rot_matrices = R.from_quat(poses[:-1, 3:7]).as_matrix() 

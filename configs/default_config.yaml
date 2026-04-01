@@ -14,6 +14,7 @@ kinematics:
 
 # 3. 感知层参数 (NLM + 光流 + 掩膜)
 perception:
+  step: 5 
   filter_win_feat: 15      # 图像特征滤波窗口
   poly_order_feat: 2       # 图像特征滤波多项式阶数
   trim_edge: 20            # 丢弃微分畸变的边缘帧数
@@ -21,7 +22,7 @@ perception:
   
   # NLM (Non-Local Means) 强效保边去噪
   nlm:
-    h: 8                   # 过滤强度 (你的 PoC 版设为 8, 效果最佳)
+    h: 15                   # 过滤强度 (你的 PoC 版设为 8, 效果最佳)
     template_window: 5     # 计算权重的图块大小
     search_window: 21      # 搜索相似块的窗口大小
 
