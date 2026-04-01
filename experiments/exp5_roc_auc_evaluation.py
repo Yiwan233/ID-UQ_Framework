@@ -27,9 +27,9 @@ from core.data_loader import safe_open_zarr, get_episode_data
 
 def evaluate_single_episode(ep_id, config_path):
     """
-    独立子进程：处理单个 Episode，自动提取标定区和 Ground Truth
+    独立子进程：处理单个 Episode，使用动态相对阈值进行自动打标
     """
-    cv2.setNumThreads(1) # 防止 OpenCV 线程灾难
+    cv2.setNumThreads(1) 
     
     try:
         cfg = IDUQConfig.from_yaml(config_path)
@@ -43,10 +43,8 @@ def evaluate_single_episode(ep_id, config_path):
         step = cfg.perception.get('step', 1)
         trim = cfg.perception.get('trim_edge', 20)
         
-        # 1. 核心 GPU 物理特征提取
         xi_trim, s_dot_trim = perception.process_episode(images, poses)
         
-        # 🛡️ 终极防御 1：强制对齐长度 (防底层 perception 漏掉维度对齐)
         min_len = min(len(xi_trim), len(s_dot_trim))
         xi_trim = xi_trim[:min_len]
         s_dot_trim = s_dot_trim[:min_len]
@@ -56,11 +54,9 @@ def evaluate_single_episode(ep_id, config_path):
         contact_ratios = []
         
         for k in range(N_valid):
-            # 🛡️ 严格时序对齐：根据 s_dot 截取逻辑计算当前帧的物理索引
             curr_idx = step + trim + 1 + k
             prev_idx = curr_idx - step
             
-            # 安全越界保护
             if curr_idx >= len(images) or prev_idx < 0:
                 break
                 
@@ -70,17 +66,15 @@ def evaluate_single_episode(ep_id, config_path):
             gray_curr = cv2.cvtColor(img_curr, cv2.COLOR_RGB2GRAY) if img_curr.ndim == 3 else img_curr
             gray_prev = cv2.cvtColor(img_prev, cv2.COLOR_RGB2GRAY) if img_prev.ndim == 3 else img_prev
             
-            # 记录 Baseline: 纯图像 SSIM
             ssim_list.append(ssim(gray_prev, gray_curr, data_range=255))
             
-            # 🚀 关键修复：强烈的高斯平滑，抑制超声散斑对掩膜的毁灭性打击！
+            # 高斯平滑抑制散斑
             gray_blur = cv2.GaussianBlur(gray_curr, (7, 7), 0)
             gray_cp = cp.array(gray_blur, dtype=cp.float64)
             W_cp = perception.get_confidence_mask_gpu(gray_cp)
             
             contact_ratios.append(float(cp.mean(W_cp > 0.5)))
             
-        # 重新对齐 (防 break 提前结束)
         N_valid = len(ssim_list)
         xi_trim = xi_trim[:N_valid]
         s_dot_trim = s_dot_trim[:N_valid]
@@ -88,13 +82,21 @@ def evaluate_single_episode(ep_id, config_path):
         ssim_arr = np.array(ssim_list)
         contact_arr = np.array(contact_ratios)
         
-        # 3. 物理弱监督：寻找 Calibration Zone
-        good_contact_idx = np.where(contact_arr > 0.6)[0]
-        # 放宽限制：只要有 30 帧好的，就能勉强作为名义标定
+        # ==========================================
+        # 🚀 核心修复：相对动态阈值 (Relative Dynamic Thresholding)
+        # ==========================================
+        max_contact = np.max(contact_arr)
+        if max_contact < 0.1:
+            return {"Episode": ep_id, "Error": f"Blank or invalid ultrasound images (Max contact: {max_contact:.2f})"}
+
+        # 1. 标定区提取：取该序列最高接触质量的 85% 以上作为 Nominal Zone
+        calib_threshold = max_contact * 0.85
+        good_contact_idx = np.where(contact_arr > calib_threshold)[0]
+        
         if len(good_contact_idx) < 30: 
-            return {"Episode": ep_id, "Error": f"Contact ratio too low (Max: {np.max(contact_arr):.2f})"}
+            return {"Episode": ep_id, "Error": f"Not enough stable frames for calibration (Max: {max_contact:.2f})"}
             
-        calib_idx = good_contact_idx[:150] # 取早期最多 150 帧作为标定
+        calib_idx = good_contact_idx[:150]
         
         vz = xi_trim[:, 2].reshape(-1, 1)
         div = s_dot_trim[:, 2].reshape(-1, 1)
@@ -102,24 +104,21 @@ def evaluate_single_episode(ep_id, config_path):
         X_norm = StandardScaler().fit_transform(vz)
         Y_norm = StandardScaler().fit_transform(div)
         
-        # 训练标定模型 (Nominal Digital Twin)
+        # 训练数字孪生基线模型
         model = Ridge(alpha=1.0)
         model.fit(X_norm[calib_idx], Y_norm[calib_idx])
         
-        # 4. 计算交互风险残差 R_phys
         R_phys_raw = np.abs(Y_norm - model.predict(X_norm)).flatten()
-        
-        # 🚀 算法升级：替换掉 MinMaxScaler，改用物理统计 Z-Score
-        # 计算标定区间的标准差，以此为单位衡量异常幅度
         sigma_calib = np.std(R_phys_raw[calib_idx]) + 1e-6
         R_phys_sigma = R_phys_raw / sigma_calib 
         
-        # 5. 自动生成 Ground Truth: 当声学接触面积跌破 30%，视为发生严重滑脱异常
-        y_true = (contact_arr < 0.3).astype(int)
+        # 2. 异常打标：接触面积跌破最高值的 50% 视为发生恶性滑脱
+        slip_threshold = max_contact * 0.50
+        y_true = (contact_arr < slip_threshold).astype(int)
         
         return {
             "Episode": ep_id,
-            "R_phys": R_phys_sigma, # 返回带有物理量纲的 Sigma 分数
+            "R_phys": R_phys_sigma, 
             "SSIM": ssim_arr,
             "y_true": y_true
         }
@@ -137,7 +136,6 @@ def run_roc_analysis():
     root = safe_open_zarr(cfg.io['data_path'])
     episodes = sorted(list(root.group_keys()))
     
-    # 控制多进程数量，防止显存爆炸
     max_workers = 6 
     process_func = partial(evaluate_single_episode, config_path=config_path)
     
@@ -155,8 +153,9 @@ def run_roc_analysis():
                 valid_episodes += 1
             else:
                 errors.append(res)
-                # 🚀 强制打印出错原因，不要摸黑前行
-                tqdm.write(f"⚠️ 跳过 {res['Episode']}: {res['Error'].splitlines()[0]}")
+                # 屏蔽一些已知的不重要警告，保持输出整洁
+                if "Not enough stable frames" not in res['Error'] and "Too short" not in res['Error']:
+                    tqdm.write(f"⚠️ 跳过 {res['Episode']}: {res['Error'].splitlines()[0]}")
 
     if len(all_y_true) == 0:
         print("\n💥 灾难性错误：所有数据提取失败。请往上翻阅红色的警告日志！")
@@ -164,7 +163,7 @@ def run_roc_analysis():
         
     print(f"\n✅ 数据提取完毕！成功处理了 {valid_episodes} 个 Episodes，共提取 {len(all_y_true)} 帧测试样本。")
     if errors:
-        print(f"ℹ️ 有 {len(errors)} 个序列由于数据长度不够或无接触区间而被自动忽略。")
+        print(f"ℹ️ 有 {len(errors)} 个序列由于数据长度不够或无合法接触区间被自动过滤。")
 
     # ==========================================
     # 计算全局 ROC 与 AUC
@@ -178,11 +177,9 @@ def run_roc_analysis():
         print("💥 全局数据集中未检测到正负样本（全是正常，或全是异常），无法绘制 ROC。")
         return
 
-    # Baseline: SSIM (因为 SSIM 越低越代表图像丢失，所以传入负值计算正相关 ROC)
     fpr_base, tpr_base, _ = roc_curve(y_true_global, -ssim_global)
     auc_base = auc(fpr_base, tpr_base)
     
-    # Ours: R_phys (残差越大越代表滑脱异常)
     fpr_ours, tpr_ours, thresholds = roc_curve(y_true_global, R_phys_global)
     auc_ours = auc(fpr_ours, tpr_ours)
     optimal_idx = np.argmax(tpr_ours - fpr_ours)
@@ -202,7 +199,6 @@ def run_roc_analysis():
     plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle=':')
     plt.fill_between(fpr_ours, tpr_ours, alpha=0.15, color='crimson')
     
-    # 标记最佳操作阈值点
     plt.scatter(fpr_ours[optimal_idx], tpr_ours[optimal_idx], marker='*', color='gold', s=250, edgecolor='black', zorder=5, 
                 label=f'Optimal Trigger Point ($R_{{phys}} \geq {thresholds[optimal_idx]:.2f}\sigma$)')
     
