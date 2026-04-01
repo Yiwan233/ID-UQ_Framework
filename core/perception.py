@@ -54,8 +54,13 @@ class PhysicsAwarePerception:
         """
         [🚀 优化] 在 GPU 上执行形态学、平滑和梯度计算
         """
+        # 🎯 修复核心：强制确保图像是 2D 的 (H, W)，去掉多余的通道维 (H, W, 1)
+        if gray_img_cp.ndim > 2:
+            gray_img_cp = gray_img_cp.squeeze()
+
         # 1. 阈值分割 & 形态学闭运算
         fan_mask = (gray_img_cp > 5).astype(cp.float64)
+        # 现在 size=(15, 15) 能完美匹配 2D 图像了
         fan_mask = grey_closing(fan_mask, size=(15, 15))
         
         # 2. 高斯平滑
