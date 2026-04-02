@@ -30,10 +30,10 @@ perception:
   optical_flow:
     pyr_scale: 0.5
     levels: 3
-    winsize: 15
+    winsize: 25
     iterations: 3
     poly_n: 5
-    poly_sigma: 1.2
+    poly_sigma: 1.5
     flags: 0
 
   # 声学置信度掩膜 W(u,v) 参数
