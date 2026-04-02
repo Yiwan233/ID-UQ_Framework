@@ -24,7 +24,6 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from core.config_loader import IDUQConfig
 from core.perception import PhysicsAwarePerception
 from core.data_loader import safe_open_zarr, get_episode_data
-
 def evaluate_single_episode(ep_id, config_path):
     cv2.setNumThreads(1) 
     try:
@@ -39,12 +38,10 @@ def evaluate_single_episode(ep_id, config_path):
         step = cfg.perception.get('step', 1)
         trim = cfg.perception.get('trim_edge', 20)
         
-        # 1. 核心 GPU 物理特征提取 (散度 D 与 机器人扭矩)
         xi_trim, s_dot_trim = perception.process_episode(images, poses)
         min_len = min(len(xi_trim), len(s_dot_trim))
-        xi_trim, s_dot_trim = xi_trim[:min_len], s_dot_trim[:min_len]
         
-        ssim_list, contact_ratios = [], []
+        ssim_list, intensity_energies = [], [] # 🚀 切换到亮度能量
         
         for k in range(min_len):
             curr_idx = step + trim + 1 + k
@@ -57,44 +54,49 @@ def evaluate_single_episode(ep_id, config_path):
             
             ssim_list.append(ssim(gray_prev, gray_curr, data_range=255))
             
-            # 使用 GPU 掩膜计算接触质量
+            # 计算 GPU 掩膜
             gray_blur = cv2.GaussianBlur(gray_curr, (7, 7), 0)
-            W_cp = perception.get_confidence_mask_gpu(cp.array(gray_blur, dtype=cp.float64))
-            contact_ratios.append(float(cp.mean(W_cp > 0.5)))
+            gray_cp = cp.array(gray_blur, dtype=cp.float64)
+            W_cp = perception.get_confidence_mask_gpu(gray_cp)
+            
+            # 🚀 核心改进：计算 ROI 区域内的平均像素亮度，而非单纯的面积
+            mask_roi = W_cp > 0.5
+            if cp.any(mask_roi):
+                avg_val = float(cp.mean(gray_cp[mask_roi]))
+            else:
+                avg_val = 0.0
+            intensity_energies.append(avg_val)
             
         N_valid = len(ssim_list)
-        ssim_arr, contact_arr = np.array(ssim_list), np.array(contact_ratios)
+        ssim_arr = np.array(ssim_list)
+        energy_arr = np.array(intensity_energies)
         
-        # 2. 动态相对阈值逻辑
-        max_contact = np.max(contact_arr)
-        if max_contact < 0.1:
-            return {"Episode": ep_id, "Error": "Invalid scan"}
+        # 动态相对阈值
+        max_energy = np.max(energy_arr)
+        if max_energy < 5: return {"Episode": ep_id, "Error": "Blank scan"}
 
-        # 标定区：最高质量的 85% 以上
-        calib_threshold = max_contact * 0.95
-        calib_idx = np.where(contact_arr > calib_threshold)[0][:150]
+        # 标定区：亮度最高（接触最实）的前 150 帧
+        calib_threshold = max_energy * 0.90
+        calib_idx = np.where(energy_arr > calib_threshold)[0][:150]
         
         if len(calib_idx) < 30: 
-            return {"Episode": ep_id, "Error": "Unstable calibration"}
+            return {"Episode": ep_id, "Error": "Unstable light intensity"}
             
-        # 3. 训练 Digital Twin 并计算 Sigma 残差
         X_norm = StandardScaler().fit_transform(xi_trim[:N_valid, 2].reshape(-1, 1))
         Y_norm = StandardScaler().fit_transform(s_dot_trim[:N_valid, 2].reshape(-1, 1))
         
         model = Ridge(alpha=1.0).fit(X_norm[calib_idx], Y_norm[calib_idx])
-        R_phys_raw = np.abs(Y_norm - model.predict(X_norm)).flatten()
-        sigma_calib = np.std(R_phys_raw[calib_idx]) + 1e-6
-        R_phys_sigma = R_phys_raw / sigma_calib 
+        R_phys_sigma = np.abs(Y_norm - model.predict(X_norm)).flatten() / (np.std(Y_norm[calib_idx]) + 1e-6)
         
-        # 🚀 提升敏感度：接触面积跌破最高值的 75% 即视为异常 (25% 的流失)
-        slip_threshold = max_contact * 0.75 
-        y_true = (contact_arr < slip_threshold).astype(int)
+        # 🚀 设定异常：亮度相比该序列峰值下降 15% 即视为接触风险 (0.85 阈值)
+        # 这个指标比面积敏感得多！
+        slip_threshold = max_energy * 0.85 
+        y_true = (energy_arr < slip_threshold).astype(int)
         
         return {"Episode": ep_id, "R_phys": R_phys_sigma, "SSIM": ssim_arr, "y_true": y_true}
         
     except Exception as e:
         return {"Episode": ep_id, "Error": str(e)}
-
 def run_roc_analysis():
     print("🚀 开始 300+ 序列全量评估 (敏感度增强版)...")
     config_path = "configs/default_config.yaml"
