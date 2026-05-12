@@ -4,6 +4,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import cv2
 import numpy as np
+import cupy as cp
 import matplotlib.pyplot as plt
 import logging
 from core.perception import PhysicsAwarePerception
@@ -36,7 +37,7 @@ class IDUQStressTester:
         results = {"angle": [], "D": [], "R": []}
 
         # 预先生成 W 掩膜 (假设全域有效)
-        W = np.ones(self.mask_size, dtype=np.float64)
+        W = cp.ones(self.mask_size, dtype=cp.float64)
 
         prev_img = img_source
         for ang in angles:
@@ -45,7 +46,7 @@ class IDUQStressTester:
             curr_img = cv2.warpAffine(img_source, rot_mat, self.mask_size, flags=cv2.INTER_LANCZOS4)
             
             # 提取仿射特征 [tx, ty, D, R]
-            feats = self.perception.calculate_affine_flow(prev_img, curr_img, W)
+            feats = self.perception.calculate_affine_flow_gpu(prev_img, curr_img, W)
             
             results["angle"].append(ang)
             results["D"].append(feats[2])
@@ -70,8 +71,8 @@ class IDUQStressTester:
         img2 = cv2.warpAffine(img1, M_scale, self.mask_size, flags=cv2.INTER_LANCZOS4)
         
         # 计算无噪声时的真值
-        W = np.ones(self.mask_size, dtype=np.float64)
-        gt_feats = self.perception.calculate_affine_flow(img1, img2, W)
+        W = cp.ones(self.mask_size, dtype=cp.float64)
+        gt_feats = self.perception.calculate_affine_flow_gpu(img1, img2, W)
         D_gt = gt_feats[2]
         
         variances = np.linspace(0.0, noise_max, steps)
@@ -84,7 +85,7 @@ class IDUQStressTester:
             noisy_img2 = np.clip(img2 + img2 * noise, 0, 255).astype(np.uint8)
             
             # 在污染后的图像中提取特征
-            noisy_feats = self.perception.calculate_affine_flow(noisy_img1, noisy_img2, W)
+            noisy_feats = self.perception.calculate_affine_flow_gpu(noisy_img1, noisy_img2, W)
             D_noisy = noisy_feats[2]
             
             # 计算相对误差
