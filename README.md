@@ -59,7 +59,8 @@ ID-UQ_Framework/
 │   ├── exp3_flow_visualization.py     # Dense flow & divergence heatmap evolution (GPU-accelerated)
 │   ├── exp4_kinematic_residual.py     # Forward tracking with 3σ statistical confidence bounds
 │   ├── exp5_roc_auc_evaluation.py     # Global ROC-AUC evaluation across 300+ episodes
-│   └── exp6_dual_eye_decoupling.py    # Dual-track orthogonal decoupling phase space analysis
+│   ├── exp6_dual_eye_decoupling.py    # Dual-track orthogonal decoupling phase space analysis
+│   └── exp7_closing_the_loop.py        # Closed-loop: uncertainty-guided active servoing simulation
 └── tools/
     └── offline_calibration.py         # Offline robust Jacobian calibration (Huber regression)
 ```
@@ -116,6 +117,12 @@ python experiments/exp3_flow_visualization.py
 Validates the core theoretical claim that the Physical Eye (R_phys) and Geometric Eye (S_geo) are orthogonal uncertainty dimensions. Plots a four-quadrant phase space showing distinct failure modes: pure sliding, severe decoupling, acoustic shadowing, and the ideal servoing envelope.
 ```bash
 python experiments/exp6_dual_eye_decoupling.py
+```
+
+### [EXP 7] Closing the Loop: Uncertainty-Guided Active Servoing
+Demonstrates the full closed-loop pipeline — uncertainty is not merely diagnosed but utilized as an actionable gradient. Part A quantifies R_phys predictive lead time over SSIM for contact-loss early warning. Part B learns empirical action→state dynamics from data. Part C simulates blind (open-loop) vs. UQ-guided (closed-loop) policies, showing that uncertainty-driven decisions converge to the ideal servoing envelope (Quadrant IV).
+```bash
+python experiments/exp7_closing_the_loop.py
 ```
 
 ### [EXP 4] Kinematic Residual & Uncertainty Tube
