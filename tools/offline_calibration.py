@@ -2,6 +2,8 @@
 
 import zarr
 import numpy as np
+import cv2
+import cupy as cp
 from sklearn.linear_model import HuberRegressor
 from core.config_loader import IDUQConfig
 from core.perception import PhysicsAwarePerception
@@ -30,8 +32,9 @@ def calibrate_robust_prior_jacobian():
         for img in images:
             curr_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if len(img.shape) == 3 else img
             if prev_img is not None:
-                W = perception.get_confidence_mask(curr_gray)
-                s_dot.append(perception.calculate_affine_flow(prev_img, curr_gray, W))
+                curr_gray_cp = cp.array(curr_gray, dtype=cp.float64)
+                W = perception.get_confidence_mask_gpu(curr_gray_cp)
+                s_dot.append(perception.calculate_affine_flow_gpu(prev_img, curr_gray, W).get())
             else:
                 s_dot.append(np.array([0,0,0,0]))
             prev_img = curr_gray
@@ -62,7 +65,7 @@ def calibrate_robust_prior_jacobian():
     np.set_printoptions(precision=4, suppress=True, linewidth=100)
     print(J_prior)
     print("===============================================================")
-    print(">> You can now copy this matrix into your config.yaml or controller.")
+    print(">> You can now copy this matrix into your config.yaml or experiment scripts.")
 
 if __name__ == "__main__":
     calibrate_robust_prior_jacobian()
