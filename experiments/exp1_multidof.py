@@ -1,7 +1,6 @@
 # experiments/exp1_multidof.py
 
 import os
-import zarr
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -11,29 +10,50 @@ from sklearn.preprocessing import StandardScaler
 
 from core.config_loader import IDUQConfig
 from core.perception import PhysicsAwarePerception
+from core.data_loader import safe_open_zarr, get_episode_data
 
 def compute_best_correlation_pe_gated(sig_robot, sig_feat, pe_ratio=0.15, max_lag=25):
-    """门控持续激发(PE)相关性计算"""
+    """Cross-correlation alignment with persistent excitation (PE) gating."""
+    n = len(sig_robot)
+    if n < 20:
+        return sig_robot, sig_feat, 0.0, 0.0, np.ones(n, dtype=bool)
+
     scaler = StandardScaler()
     sig_robot_norm = scaler.fit_transform(sig_robot.reshape(-1, 1)).flatten()
     sig_feat_norm = scaler.fit_transform(sig_feat.reshape(-1, 1)).flatten()
 
-    best_offset, max_corr = 0, -1.0
+    best_offset, best_corr = 0, -1.0
     for offset in range(-max_lag, max_lag + 1):
-        # ... (对齐逻辑同上，略去防止刷屏，完全保留你原来的逻辑) ...
-        # (假设在此获得了 x_al_norm, y_al_norm 和 x_al_raw)
-        x_al_norm, y_al_norm = sig_robot_norm, sig_feat_norm
-        x_al_raw = sig_robot
-        pass 
-        
+        x_shifted = np.roll(sig_robot_norm, offset)
+        y_ref = sig_feat_norm
+        if offset > 0:
+            mask = np.arange(n) >= offset
+        elif offset < 0:
+            mask = np.arange(n) < n + offset
+        else:
+            mask = np.ones(n, dtype=bool)
+        if np.sum(mask) < 15:
+            continue
+        corr_val = abs(np.corrcoef(x_shifted[mask], y_ref[mask])[0, 1])
+        if corr_val > best_corr:
+            best_corr = corr_val
+            best_offset = offset
+
+    x_aligned = np.roll(sig_robot_norm, best_offset)
+    if best_offset > 0:
+        x_aligned[:best_offset] = x_aligned[best_offset]
+    elif best_offset < 0:
+        x_aligned[best_offset:] = x_aligned[best_offset - 1]
+
+    x_al_raw = np.roll(sig_robot, best_offset)
     pe_threshold = max(0.001, pe_ratio * np.max(np.abs(x_al_raw)))
     pe_mask = np.abs(x_al_raw) > pe_threshold
-    
-    pe_corr = max_corr
-    if np.sum(pe_mask) > 15: 
-        pe_corr = abs(np.corrcoef(x_al_norm[pe_mask], y_al_norm[pe_mask])[0, 1])
-        
-    return x_al_norm, y_al_norm, max_corr, pe_corr, pe_mask
+
+    pe_corr = best_corr
+    if np.sum(pe_mask) > 15:
+        pe_corr = abs(np.corrcoef(x_aligned[pe_mask], sig_feat_norm[pe_mask])[0, 1])
+
+    return x_aligned, sig_feat_norm, best_corr, pe_corr, pe_mask
 
 def run_batch_multi_dof_experiment():
     cfg = IDUQConfig.from_yaml("configs/default_config.yaml")
@@ -41,25 +61,24 @@ def run_batch_multi_dof_experiment():
     os.makedirs(output_dir, exist_ok=True)
     
     print(f"🚀 开始全自由度遍历！结果将保存在 '{output_dir}'")
-    root = zarr.open(cfg.io['data_path'], mode='r')
+    root = safe_open_zarr(cfg.io['data_path'])
     episodes = list(root.group_keys())
-    
+
     perception = PhysicsAwarePerception(cfg)
-    
+
     log_file_path = os.path.join(output_dir, 'multi_dof_summary_log.txt')
     with open(log_file_path, 'w', encoding='utf-8') as log_file:
         def log_print(msg):
             print(msg)
             log_file.write(msg + '\n')
-            
+
         log_print("="*70)
         log_print("全自由度解耦与可观测性报告 (Multi-DOF Decoupling Report)")
         log_print("="*70)
-        
+
         for ep in episodes:
             log_print(f"\n>>> 开始处理 {ep} ...")
-            images = root[ep]['images'][:]
-            poses = root[ep]['poses'][:]
+            images, poses = get_episode_data(root, ep)
             
             # 🔥 1. 一键提取特征
             xi_tool, s_dot = perception.process_episode(images, poses)
