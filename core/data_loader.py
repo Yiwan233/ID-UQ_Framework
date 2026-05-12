@@ -8,14 +8,6 @@ from typing import Tuple, List, Union, Any
 
 logger = logging.getLogger(__name__)
 
-# 🎯 兼容性补丁：自动识别 Zarr 版本对应的 Group 类型
-try:
-    # Zarr V2 路径
-    ZARR_GROUP_TYPE = zarr.hierarchy.Group
-except AttributeError:
-    # Zarr V3 路径
-    ZARR_GROUP_TYPE = zarr.Group
-
 def safe_open_zarr(path: str) -> Any:
     """
     针对底层元数据缺失的 Zarr 文件夹进行鲁棒打开。
