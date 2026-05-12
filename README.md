@@ -37,26 +37,31 @@ We formalize the problem as a constrained optimization on a Riemannian manifold,
 
 ---
 
-## 📂 Production-Ready Architecture
+## 📂 Repository Structure
 
-The codebase has been heavily refactored from academic exploration scripts into a production-ready, highly modular framework. The core continuous mechanics engine is strictly separated from the experimental visualization scripts.
+The codebase is organized into a modular core engine (continuous mechanics pipeline) and independent experiment scripts for reproducing all paper figures.
 
 ```text
 ID-UQ_Framework/
 ├── configs/
-│   └── default_config.yaml        # ⚙️ Unified parameter center (Zero Magic Numbers)
+│   └── default_config.yaml        # Unified parameter center (Zero Magic Numbers)
 ├── core/
-│   ├── config_loader.py           # Type-safe configuration parsing
-│   ├── perception.py              # 🧠 Continuum Mechanics: NLM, Adjoint Twist, Affine Divergence
-│   └── alignment.py               # ⏱️ Phase Alignment & GLRT Residual Generation
-├── experiments/                   # 📊 Scripts to reproduce all paper figures
-│   ├── exp1_ablation.py           # Fig: Kinematic Consistency & Feature Observability
-│   ├── exp1_multidof.py           # Fig: Multi-DOF Kinematic-Affine Tracking
-│   ├── exp2_anomaly_roc.py        # Fig: Spatiotemporal Spiking Response to Physical Instability
-│   ├── exp3_flow_visualization.py # Fig: Dense Flow & Divergence Heatmaps Evolution
-│   ├── exp4_kinematic_residual.py # Fig: Forward Tracking with 3σ Statistical Confidence Bounds
-│   └── exp5_roc_auc_evaluation.py # Fig: Global ROC-AUC Calculation across episodes
-└── main.py                        # 🚀 High-level pipeline scheduler
+│   ├── config_loader.py           # Type-safe YAML configuration parsing
+│   ├── perception.py              # GPU-accelerated continuum mechanics: NLM, Adjoint Twist, Affine Divergence
+│   ├── alignment.py               # Cross-correlation phase alignment & residual generation
+│   └── data_loader.py             # Robust Zarr I/O with metadata healing for V2/V3 compatibility
+├── experiments/
+│   ├── exp0_synthetic_stress_test.py   # Synthetic validation: rotation decoupling & SNR breakdown
+│   ├── exp1_ablation.py               # Ablation study: feature observability across motion complexity
+│   ├── exp1_diagnostic_tails.py        # Diagnostic analysis of failure modes (tail pathology)
+│   ├── exp1_multidof.py               # Multi-DOF kinematic-affine tracking visualization
+│   ├── exp2_anomaly_roc.py            # Single-episode anomaly detection ROC with SSIM baseline
+│   ├── exp3_flow_visualization.py     # Dense flow & divergence heatmap evolution (GPU-accelerated)
+│   ├── exp4_kinematic_residual.py     # Forward tracking with 3σ statistical confidence bounds
+│   ├── exp5_roc_auc_evaluation.py     # Global ROC-AUC evaluation across 300+ episodes
+│   └── exp6_dual_eye_decoupling.py    # Dual-track orthogonal decoupling phase space analysis
+└── tools/
+    └── offline_calibration.py         # Offline robust Jacobian calibration (Huber regression)
 ```
 
 ---
@@ -72,7 +77,7 @@ pip install -r requirements.txt
 *(Dependencies: `numpy`, `scipy`, `opencv-python`, `scikit-learn`, `zarr`, `matplotlib`, `seaborn`, `scikit-image`)*
 
 **2. Dataset Preparation:**
-Place your collected robotic ultrasound dataset (`collected_data.zarr`) in the project root directory. The dataset should contain synchronized robot `poses` and ultrasound `images`.
+Place your collected robotic ultrasound dataset (`.zarr` format) in the `data/` directory. The default path is `data/servo_dataset_dp.zarr` (configurable in `configs/default_config.yaml`). Each episode should contain synchronized robot `poses` (or `ee_pose`) and ultrasound `images`.
 
 ---
 
@@ -80,11 +85,18 @@ Place your collected robotic ultrasound dataset (`collected_data.zarr`) in the p
 
 Reviewers and researchers can effortlessly reproduce all figures presented in the manuscript using the scripts in the `experiments/` directory.
 
+### [EXP 0] Synthetic Stress Test (Methodology Validation)
+Validates the core decoupling hypothesis under controlled synthetic conditions: pure rotation (kinematic singularity) and multiplicative speckle noise injection. Confirms that divergence (D) remains near zero under rotation while curl (R) responds linearly, and identifies the numerical SNR breakdown threshold.
+```bash
+python experiments/exp0_synthetic_stress_test.py
+```
+
 ### [EXP 1] Robustness of Affine Divergence (Ablation Study)
 Demonstrates that affine divergence ($D$) strongly correlates with the Adjoint $Z$-velocity, completely outperforming traditional threshold-based geometric area features under acoustic shadowing.
 ```bash
 python experiments/exp1_ablation.py
 python experiments/exp1_multidof.py
+python experiments/exp1_diagnostic_tails.py
 ```
 
 ### [EXP 2 & 5] Contact Failure Detection (GLRT & ROC-AUC)
@@ -98,6 +110,12 @@ python experiments/exp5_roc_auc_evaluation.py
 Visualizes the elastodynamic principles: NLM-denoised B-mode images alongside edge-preserved HSV flow and dense divergence heatmaps.
 ```bash
 python experiments/exp3_flow_visualization.py
+```
+
+### [EXP 6] Dual-Eye Orthogonal Decoupling (Phase Space Analysis)
+Validates the core theoretical claim that the Physical Eye (R_phys) and Geometric Eye (S_geo) are orthogonal uncertainty dimensions. Plots a four-quadrant phase space showing distinct failure modes: pure sliding, severe decoupling, acoustic shadowing, and the ideal servoing envelope.
+```bash
+python experiments/exp6_dual_eye_decoupling.py
 ```
 
 ### [EXP 4] Kinematic Residual & Uncertainty Tube
@@ -119,7 +137,9 @@ To facilitate code review, here is the exact mapping between the LaTeX manuscrip
 | **Phase Alignment (Smith Predictor)** | `correlate(Y_norm, X_norm, mode='full')` | `core/alignment.py` |
 | **Physical Risk Residual** $\mathcal{R}_{phys}$ | `mahalanobis_dist * np.exp(gamma*(1-ssim))` | `experiments/exp2_anomaly_roc.py` |
 | **Dual-Track: Control Prior** $\mathbf{J}_{prior}$ | `Ridge(alpha=1.0).fit(X, Y)` (Offline) | `experiments/exp4_kinematic_residual.py` |
-| **Dual-Track: Assessment** $\hat{\mathbf{M}}_k$ | `HuberRegressor().fit(X, Y)` (Online Digital Twin)| `experiments/exp2_anomaly_roc.py` |
+| **Dual-Track: Assessment** $\hat{\mathbf{M}}_k$ | `HuberRegressor().fit(X, Y)` (Online Digital Twin) | `experiments/exp2_anomaly_roc.py` |
+| **Dual-Eye: Physical Risk** $\mathcal{R}_{phys}$ | Kinematic-affine residual Z-score | `experiments/exp6_dual_eye_decoupling.py` |
+| **Dual-Eye: Geometric Eye** $\mathcal{S}_{geo}$ | Normalized acoustic observability (gradient magnitude) | `experiments/exp6_dual_eye_decoupling.py` |
 
 ---
 
