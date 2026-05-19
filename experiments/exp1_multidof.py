@@ -87,7 +87,7 @@ def run_batch_multi_dof_experiment():
                 (0, 0, "Trans X ($v_x$) vs Flow X ($t_x$)", "royalblue"),
                 (1, 1, "Trans Y ($v_y$) vs Flow Y ($t_y$)", "darkorange"),
                 (2, 2, "Trans Z ($v_z$) vs Divergence ($D$)", "crimson"),
-                (5, 3, "Roll Rot ($\omega_z$) vs Curl ($R$)", "purple")
+                (5, 3, "Roll Rot ($\\omega_z$) vs Curl ($R$)", "purple")
             ]
             
             sns.set_theme(style="whitegrid")

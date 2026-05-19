@@ -4,7 +4,7 @@
 io:
   data_path: "data/servo_dataset_dp.zarr" 
   output_dir: "Results_Ablation_Final"
-  target_episode: "episode_2" # 默认分析的 Episode
+  target_episode: "episode_1000" # 默认分析的 Episode
 
 # 2. 机器人运动学参数
 kinematics:

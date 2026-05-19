@@ -71,18 +71,18 @@ def run_batch_residual_analysis_gpu():
             # 图 1: 置信管
             ax1 = fig.add_subplot(gs[0, 0])
             ax1.plot(Y_pred, label='Predicted Nominal State ($L_{emp}\\cdot\\xi$)', color='darkorange', linestyle='--', linewidth=2)
-            ax1.fill_between(range(len(Y_pred)), Y_pred - confidence_bound, Y_pred + confidence_bound, color='darkorange', alpha=0.2, label='$\pm 2\sigma_{calib}$ Tube')
-            ax1.plot(Y_obs, label='Observed Affine State ($\dot{s}_{obs}$)', color='royalblue', alpha=0.85, linewidth=1.5)
+            ax1.fill_between(range(len(Y_pred)), Y_pred - confidence_bound, Y_pred + confidence_bound, color='darkorange', alpha=0.2, label='$\\pm 2\\sigma_{calib}$ Tube')
+            ax1.plot(Y_obs, label='Observed Affine State ($\\dot{s}_{obs}$)', color='royalblue', alpha=0.85, linewidth=1.5)
             ax1.axvline(x=split_idx, color='gray', linestyle=':', label='Calibration/Test Split')
             ax1.set_title('Forward Model Tracking with Statistical Confidence Bounds', fontsize=14)
             ax1.legend(loc='upper right')
             
             # 图 2: 残差
             ax2 = fig.add_subplot(gs[1, 0], sharex=ax1)
-            ax2.plot(R_phys, label='Kinematic-Visual Residual $\mathcal{R}_{phys}$', color='crimson', linewidth=1.5)
+            ax2.plot(R_phys, label='Kinematic-Visual Residual $\\mathcal{R}_{phys}$', color='crimson', linewidth=1.5)
             ax2.axhline(y=confidence_bound, color='purple', linestyle='--', label='Anomaly Trigger Threshold')
             ax2.fill_between(range(len(R_phys)), R_phys, color='crimson', alpha=0.2)
-            ax2.set_title('Interaction Uncertainty Metric ($\mathcal{R}_{phys}$)', fontsize=14)
+            ax2.set_title('Interaction Uncertainty Metric ($\\mathcal{R}_{phys}$)', fontsize=14)
             ax2.set_xlabel('Aligned Frames (Time)')
             ax2.legend(loc='upper right')
             

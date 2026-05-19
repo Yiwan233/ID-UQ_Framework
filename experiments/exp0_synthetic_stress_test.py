@@ -122,7 +122,7 @@ class IDUQStressTester:
 
         # --- Test B Plot ---
         ax3.set_title("Test B: SNR Breakdown Analysis", fontsize=12, fontweight='bold')
-        ax3.set_xlabel("Speckle Noise Variance ($\sigma^2$)")
+        ax3.set_xlabel("Speckle Noise Variance ($\\sigma^2$)")
         ax3.set_ylabel("Relative Error in D extraction")
         ax3.plot(noise_vars, res_b, 'D-', color='purple', linewidth=2)
         
@@ -134,7 +134,7 @@ class IDUQStressTester:
         critical_idx = np.where(np.array(res_b) > threshold)[0]
         if len(critical_idx) > 0:
             crit_var = noise_vars[critical_idx[0]]
-            ax3.annotate(f'Breakdown point\n($\sigma^2$={crit_var:.2f})', 
+            ax3.annotate(f'Breakdown point\n($\\sigma^2$={crit_var:.2f})',
                         xy=(crit_var, threshold), xytext=(crit_var+0.05, threshold+0.1),
                         arrowprops=dict(facecolor='black', shrink=0.05), fontsize=10)
 

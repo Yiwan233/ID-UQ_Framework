@@ -168,8 +168,8 @@ def run_decoupling_analysis():
     ax.set_xlim(0, 1.05)
     ax.set_ylim(0, y_max_plot)
     
-    ax.set_xlabel('Geometric Eye $\mathcal{S}_{geo}$ (Normalized Acoustic Observability)', fontsize=14)
-    ax.set_ylabel('Physical Eye $\mathcal{R}_{phys}$ (Kinematic-Affine Residual Z-Score)', fontsize=14)
+    ax.set_xlabel('Geometric Eye $\\mathcal{S}_{geo}$ (Normalized Acoustic Observability)', fontsize=14)
+    ax.set_ylabel('Physical Eye $\\mathcal{R}_{phys}$ (Kinematic-Affine Residual Z-Score)', fontsize=14)
     ax.set_title('Dual-Track Decoupling: Orthogonal Uncertainty Phase Space', fontsize=16, fontweight='bold', pad=15)
     
     plt.tight_layout()
