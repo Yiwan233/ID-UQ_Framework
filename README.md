@@ -39,7 +39,7 @@ We formalize the problem as a constrained optimization on a Riemannian manifold,
 
 ## 📂 Repository Structure
 
-The codebase is organized into a modular core engine (continuous mechanics pipeline) and independent experiment scripts for reproducing all paper figures.
+The codebase is organized into a modular core engine, exploratory experiment scripts, and a shared benchmark protocol for publication-grade evaluation.
 
 ```text
 ID-UQ_Framework/
@@ -71,20 +71,43 @@ ID-UQ_Framework/
 
 **1. Clone the repository and install dependencies:**
 ```bash
-git clone https://github.com/YourUsername/ID-UQ-Visual-Servoing.git
-cd ID-UQ-Visual-Servoing
+git clone https://github.com/Yiwan233/ID-UQ_Framework.git
+cd ID-UQ_Framework
 pip install -r requirements.txt
 ```
-*(Dependencies: `numpy`, `scipy`, `opencv-python`, `scikit-learn`, `zarr`, `matplotlib`, `seaborn`, `scikit-image`)*
+`cupy` must match the local CUDA runtime. If plain `cupy` is not appropriate for your GPU environment, install the matching package manually, for example `cupy-cuda12x`.
 
 **2. Dataset Preparation:**
 Place your collected robotic ultrasound dataset (`.zarr` format) in the `data/` directory. The default path is `data/servo_dataset_dp.zarr` (configurable in `configs/default_config.yaml`). Each episode should contain synchronized robot `poses` (or `ee_pose`) and ultrasound `images`.
+
+**3. Publication-grade benchmark inputs:**
+The unified benchmark requires independent labels and fixed splits:
+```text
+data/eval_labels.csv
+data/eval_splits.json
+```
+See `docs/evaluation_protocol.md` for the label schema, split policy, metrics, and publication checklist.
 
 ---
 
 ## 🧪 Reproducing Paper Experiments
 
-Reviewers and researchers can effortlessly reproduce all figures presented in the manuscript using the scripts in the `experiments/` directory.
+The scripts in `experiments/` reproduce exploratory figures and diagnostics. Claims intended for publication should be evaluated with the shared benchmark protocol below, using held-out splits and independent labels.
+
+### Unified Benchmark Evaluation
+Runs the common evaluation pipeline for SSIM, brightness deviation, divergence deviation, and ID-UQ residual scores.
+```bash
+python experiments/evaluate_benchmark.py \
+  --labels data/eval_labels.csv \
+  --splits data/eval_splits.json
+```
+Outputs are written under `Results_Ablation_Final/Benchmark` by default:
+```text
+benchmark_summary.csv
+benchmark_summary.md
+test_frame_scores.csv
+benchmark_curves.png
+```
 
 ### [EXP 0] Synthetic Stress Test (Methodology Validation)
 Validates the core decoupling hypothesis under controlled synthetic conditions: pure rotation (kinematic singularity) and multiplicative speckle noise injection. Confirms that divergence (D) remains near zero under rotation while curl (R) responds linearly, and identifies the numerical SNR breakdown threshold.
@@ -120,7 +143,7 @@ python experiments/exp6_dual_eye_decoupling.py
 ```
 
 ### [EXP 7] Closing the Loop: Uncertainty-Guided Active Servoing
-Demonstrates the full closed-loop pipeline — uncertainty is not merely diagnosed but utilized as an actionable gradient. Part A quantifies R_phys predictive lead time over SSIM for contact-loss early warning. Part B learns empirical action→state dynamics from data. Part C simulates blind (open-loop) vs. UQ-guided (closed-loop) policies, showing that uncertainty-driven decisions converge to the ideal servoing envelope (Quadrant IV).
+Simulates uncertainty-guided control using an empirical action-state model. Part A quantifies R_phys predictive lead time over SSIM for contact-loss early warning. Part B learns empirical action-to-state dynamics from data. Part C compares blind open-loop and UQ-guided policies in simulation. A hardware closed-loop experiment is still required for a real active-servoing claim.
 ```bash
 python experiments/exp7_closing_the_loop.py
 ```
